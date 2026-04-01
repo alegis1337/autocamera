@@ -1,0 +1,55 @@
+[
+  {
+    "id": "noviy-ceh",
+    "name": "Новый цех (iPanda)",
+    "type": "ipanda",
+    "enabled": true,
+    "urlEnv": "NOVIY_CEH_URL",
+    "userEnv": "NOVIY_CEH_USER",
+    "passEnv": "NOVIY_CEH_PASS",
+    "loginRequired": true,
+    "cameraCount": 10,
+    "cameras": [
+      { "index": 0, "name": "Новый цех Cam 01" },
+      { "index": 1, "name": "Новый цех Cam 02" },
+      { "index": 2, "name": "Новый цех Cam 03" },
+      { "index": 3, "name": "Новый цех Cam 04" },
+      { "index": 4, "name": "Новый цех Cam 05" },
+      { "index": 5, "name": "Новый цех Cam 06" },
+      { "index": 6, "name": "Новый цех Cam 07" },
+      { "index": 7, "name": "Новый цех Cam 08" },
+      { "index": 8, "name": "Новый цех Cam 09" },
+      { "index": 9, "name": "Новый цех Cam 10" }
+    ]
+  },
+  {
+    "id": "hiwatch-sklad",
+    "name": "Склад (HiWatch)",
+    "type": "hiwatch",
+    "enabled": true,
+    "urlEnv": "HIWATCH_SKLAD_URL",
+    "userEnv": "HIWATCH_SKLAD_USER",
+    "passEnv": "HIWATCH_SKLAD_PASS",
+    "loginRequired": true,
+    "cameraCount": 17,
+    "cameras": [
+      { "index": 0,  "name": "Camera 01" },
+      { "index": 1,  "name": "Camera 02" },
+      { "index": 2,  "name": "Camera 03" },
+      { "index": 3,  "name": "Camera 04" },
+      { "index": 4,  "name": "Camera 05" },
+      { "index": 5,  "name": "Camera 06" },
+      { "index": 6,  "name": "Camera 07" },
+      { "index": 7,  "name": "Camera 08" },
+      { "index": 8,  "name": "Camera 09" },
+      { "index": 9,  "name": "Camera 10" },
+      { "index": 10, "name": "Camera 11" },
+      { "index": 11, "name": "Camera 12" },
+      { "index": 12, "name": "Camera 13" },
+      { "index": 13, "name": "Camera 14" },
+      { "index": 14, "name": "Camera 15" },
+      { "index": 15, "name": "IPCamera 01" },
+      { "index": 16, "name": "IPCamera 02" }
+    ]
+  }
+]

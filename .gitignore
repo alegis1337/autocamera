@@ -1,0 +1,18 @@
+node_modules/
+.env
+
+# Runtime data
+screenshots/*.png
+reports/*.html
+logs/*.log
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code local settings
+.claude/

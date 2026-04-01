@@ -1,0 +1,21 @@
+{
+  "name": "autocamera",
+  "version": "1.0.0",
+  "description": "Automated camera monitoring — Playwright + polza.ai vision",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dry-run": "node src/index.js --dry-run",
+    "test-email": "node src/index.js --test-email",
+    "test-cam": "node src/index.js --dry-run --only"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.0",
+    "nodemailer": "^6.9.0",
+    "openai": "^4.0.0",
+    "playwright": "^1.40.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
