@@ -166,6 +166,9 @@ export async function checkHikvisionMultiSystem(sys) {
     results.push({
       index: cam.index,
       name:  cam.name,
+      // Сохраняем host/port из config — нужны для активной диагностики (v2)
+      host:  cam.host,
+      port:  cam.port,
       online: r.online,
       recording: r.recording,
       recordingFresh: r.recordingFresh,

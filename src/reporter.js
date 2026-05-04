@@ -137,9 +137,11 @@ export function buildReport({ systemResults, runMeta, group }) {
     ? '<div class="rec-row">Запись ведётся на всех рабочих камерах.</div>'
     : `<div class="rec-row err">Нет записи: ${notRecording.join(', ')}.</div>`;
 
-  // ── Секция «Диагностика» (только браузер) ──────────────────────────────────
+  // ── Секция «Диагностика» — теперь и в email-отчёт (per-group) ─────────────
+  // Показываем причину, и если есть активная диагностика (cam.diagnosis) —
+  // её rootCause + recommendation отдельной строкой.
   let diagnosticHtml = '';
-  if (!group) {
+  {
     const diagItems = [];
     for (const sys of filtered) {
       // Ошибки системы
@@ -148,18 +150,22 @@ export function buildReport({ systemResults, runMeta, group }) {
           system: shortSysName(sys.name),
           level: 'error',
           message: sys.error,
+          diagnosis: sys.diagnosis || null,
         });
       }
-      // Проблемные камеры с заметками
+      // Проблемные камеры с заметками или диагнозом
       for (const cam of sys.cameras) {
         if (isUnused(sys, cam)) continue;
-        if (cam.online === false && cam.notes) {
-          diagItems.push({
-            system: shortSysName(sys.name),
-            level: 'warn',
-            message: `${cam.name || 'Камера ' + ((cam.index ?? 0) + 1)}: ${cam.notes}`,
-          });
-        }
+        const isOff = cam.online === false;
+        const noRec = cam.online === true && cam.recording === false;
+        if (!isOff && !noRec) continue;
+        if (!cam.notes && !cam.diagnosis) continue;
+        diagItems.push({
+          system: shortSysName(sys.name),
+          level: isOff ? 'warn' : 'info',
+          message: `${cam.name || 'Камера ' + ((cam.index ?? 0) + 1)}: ${cam.notes || ''}`.trim(),
+          diagnosis: cam.diagnosis || null,
+        });
       }
     }
 
@@ -167,9 +173,15 @@ export function buildReport({ systemResults, runMeta, group }) {
       const diagRows = diagItems.map(d => {
         const icon = d.level === 'error' ? '&#9888;' : '&#9679;';
         const color = d.level === 'error' ? '#c53030' : '#dd6b20';
+        const diagBlock = d.diagnosis && d.diagnosis.rootCause
+          ? `<div style="font-size:11px;color:#c53030;font-weight:700;margin-top:2px;">${d.diagnosis.rootCause}</div>`
+            + (d.diagnosis.recommendation
+                ? `<div style="font-size:11px;color:#718096;margin-top:1px;">→ ${d.diagnosis.recommendation}</div>`
+                : '')
+          : '';
         return `<tr style="border-bottom:1px solid #e2e8f0;">
           <td style="padding:4px 8px;font-size:12px;font-weight:600;color:#2c5282;white-space:nowrap;vertical-align:top;">${d.system}</td>
-          <td style="padding:4px 8px;font-size:12px;color:${color};"><span style="margin-right:4px;">${icon}</span>${d.message}</td>
+          <td style="padding:4px 8px;font-size:12px;color:${color};vertical-align:top;"><span style="margin-right:4px;">${icon}</span>${d.message}${diagBlock}</td>
         </tr>`;
       }).join('');
 
@@ -178,7 +190,7 @@ export function buildReport({ systemResults, runMeta, group }) {
 <table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;font-family:Arial,sans-serif;margin-bottom:12px;">
   <tr style="background:#edf2f7;">
     <th style="padding:4px 8px;font-size:11px;text-align:left;font-weight:600;color:#4a5568;">Система</th>
-    <th style="padding:4px 8px;font-size:11px;text-align:left;font-weight:600;color:#4a5568;">Проблема</th>
+    <th style="padding:4px 8px;font-size:11px;text-align:left;font-weight:600;color:#4a5568;">Проблема / диагностика</th>
   </tr>
   ${diagRows}
 </table>`;
@@ -254,11 +266,20 @@ export function buildReport({ systemResults, runMeta, group }) {
                     : cam.recording === true  ? '<span style="color:#2f855a;">да</span>'
                     : '<span style="color:#a0aec0;">—</span>';
           const reason = cam.notes || 'причина неизвестна';
+          // Диагностика (v2): если есть cam.diagnosis с rootCause, показываем
+          // как отдельный блок жирным, плюс рекомендацию серым.
+          let diagBlock = '';
+          if (cam.diagnosis && cam.diagnosis.rootCause) {
+            const rec2 = cam.diagnosis.recommendation
+              ? `<div style="font-size:10px;color:#718096;margin-top:1px;">→ ${cam.diagnosis.recommendation}</div>`
+              : '';
+            diagBlock = `<div style="font-size:11px;font-weight:700;color:#c53030;margin-top:2px;">${cam.diagnosis.rootCause}</div>${rec2}`;
+          }
           return `<tr style="border-bottom:1px solid #e2e8f0;">
-            <td style="padding:3px 6px;font-size:11px;">${cam.name || gridLabel(cam.name)}</td>
-            <td style="padding:3px 6px;font-size:11px;text-align:center;">${status}</td>
-            <td style="padding:3px 6px;font-size:11px;text-align:center;">${rec}</td>
-            <td style="padding:3px 6px;font-size:11px;color:#4a5568;">${reason}</td>
+            <td style="padding:3px 6px;font-size:11px;vertical-align:top;">${cam.name || gridLabel(cam.name)}</td>
+            <td style="padding:3px 6px;font-size:11px;text-align:center;vertical-align:top;">${status}</td>
+            <td style="padding:3px 6px;font-size:11px;text-align:center;vertical-align:top;">${rec}</td>
+            <td style="padding:3px 6px;font-size:11px;color:#4a5568;vertical-align:top;">${reason}${diagBlock}</td>
           </tr>`;
         }).join('');
 
@@ -268,7 +289,7 @@ export function buildReport({ systemResults, runMeta, group }) {
             <th style="padding:3px 6px;font-size:10px;text-align:left;font-weight:600;color:#4a5568;">Камера</th>
             <th style="padding:3px 6px;font-size:10px;text-align:center;font-weight:600;color:#4a5568;">Статус</th>
             <th style="padding:3px 6px;font-size:10px;text-align:center;font-weight:600;color:#4a5568;">Запись</th>
-            <th style="padding:3px 6px;font-size:10px;text-align:left;font-weight:600;color:#4a5568;">Причина / заметки</th>
+            <th style="padding:3px 6px;font-size:10px;text-align:left;font-weight:600;color:#4a5568;">Причина / диагностика</th>
           </tr>
           ${problemRows}
         </table>`;
@@ -566,6 +587,7 @@ export function collectBrokenCameras(systemResults) {
         camera: '(вся система)',
         status: 'ошибка проверки',
         notes: sys.error,
+        diagnosis: sys.diagnosis || null,
       });
       continue;
     }
@@ -589,6 +611,7 @@ export function collectBrokenCameras(systemResults) {
           camera: camLabel,
           status: 'OFFLINE',
           notes: cam.notes || '',
+          diagnosis: cam.diagnosis || null,
         });
       } else if (cam.recording === false && cam.online === true) {
         broken.push({
@@ -598,6 +621,7 @@ export function collectBrokenCameras(systemResults) {
           camera: camLabel,
           status: 'нет записи',
           notes: cam.notes || '',
+          diagnosis: cam.diagnosis || null,
         });
       }
     }
@@ -658,11 +682,19 @@ export function buildHelpdeskDiffHtml(newlyBroken, recovered, runMeta, groupLabe
       const statusCell = c._statusChanged
         ? `<span style="color:#a0aec0;text-decoration:line-through;font-size:11px;">${c._previousStatus}</span> &#8594; <span style="color:${statusColor};font-weight:700;">${c.status}</span>`
         : `<span style="color:${statusColor};font-weight:700;">${c.status}</span>`;
+      // Диагностика (v2): rootCause + recommendation в отдельном блоке.
+      let diagBlock = '';
+      if (c.diagnosis && c.diagnosis.rootCause) {
+        const rec2 = c.diagnosis.recommendation
+          ? `<div style="font-size:11px;color:#718096;margin-top:1px;">→ ${c.diagnosis.recommendation}</div>`
+          : '';
+        diagBlock = `<div style="font-size:12px;font-weight:700;color:#c53030;margin-top:3px;">${c.diagnosis.rootCause}</div>${rec2}`;
+      }
       return `<tr style="border-bottom:1px solid #e2e8f0;">
-        <td style="padding:6px 10px;font-size:13px;font-weight:600;color:#2c5282;">${c.system}</td>
-        <td style="padding:6px 10px;font-size:13px;">${c.camera}</td>
-        <td style="padding:6px 10px;font-size:13px;">${statusCell}</td>
-        <td style="padding:6px 10px;font-size:12px;color:#4a5568;">${c.notes || ''}</td>
+        <td style="padding:6px 10px;font-size:13px;font-weight:600;color:#2c5282;vertical-align:top;">${c.system}</td>
+        <td style="padding:6px 10px;font-size:13px;vertical-align:top;">${c.camera}</td>
+        <td style="padding:6px 10px;font-size:13px;vertical-align:top;">${statusCell}</td>
+        <td style="padding:6px 10px;font-size:12px;color:#4a5568;vertical-align:top;">${c.notes || ''}${diagBlock}</td>
       </tr>`;
     }).join('');
 
@@ -675,7 +707,7 @@ export function buildHelpdeskDiffHtml(newlyBroken, recovered, runMeta, groupLabe
     <th style="padding:8px 10px;font-size:12px;text-align:left;">Система</th>
     <th style="padding:8px 10px;font-size:12px;text-align:left;">Камера</th>
     <th style="padding:8px 10px;font-size:12px;text-align:left;">Статус</th>
-    <th style="padding:8px 10px;font-size:12px;text-align:left;">Подробности</th>
+    <th style="padding:8px 10px;font-size:12px;text-align:left;">Подробности / диагностика</th>
   </tr>
   ${rows}
 </table>`;
