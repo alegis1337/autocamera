@@ -41,6 +41,33 @@ const onlyId      = (() => {
 
 if (isDebug) log.setLogLevel('DEBUG');
 
+// ─── TEST_MODE banner (v2 dev environment) ──────────────────────────────────
+// Печатается, если в .env установлено TEST_MODE=true.
+// Защита от случайного запуска прод-конфига в тестовой папке: показывает,
+// какие реально адреса используются как получатели.
+if (process.env.TEST_MODE === 'true') {
+  const truncate = (s, n = 80) => (s || '').length > n ? (s.slice(0, n) + '…') : (s || '(пусто)');
+  const banner = [
+    '',
+    '╔══════════════════════════════════════════════════════════════════════╗',
+    '║                    *** TEST MODE — v2 DEV ENV ***                    ║',
+    '║                                                                      ║',
+    '║  Это тестовая среда AutoCamera. Письма уходят только на              ║',
+    '║  тестовые адреса (см. ниже). Helpdesk при пустом HELPDESK_TO         ║',
+    '║  отключён.                                                           ║',
+    '╠══════════════════════════════════════════════════════════════════════╣',
+    `║  REPORT_TO_EVROPLAST: ${truncate(process.env.REPORT_TO_EVROPLAST, 47).padEnd(47)}║`,
+    `║  REPORT_TO_ONLINE:    ${truncate(process.env.REPORT_TO_ONLINE, 47).padEnd(47)}║`,
+    `║  REPORT_TO (fallback):${truncate(process.env.REPORT_TO, 47).padEnd(47)}║`,
+    `║  HELPDESK_TO:         ${truncate(process.env.HELPDESK_TO, 47).padEnd(47)}║`,
+    `║  YANDEX_DISK_ROOT:    ${truncate(process.env.YANDEX_DISK_ROOT, 47).padEnd(47)}║`,
+    '╚══════════════════════════════════════════════════════════════════════╝',
+    '',
+  ].join('\n');
+  console.log(banner);
+  log.info('test-mode', 'TEST_MODE активен — все письма идут на тестовые адреса');
+}
+
 // ─── Load systems config ──────────────────────────────────────────────────────
 const ROOT = path.resolve('.');
 const systemsConfig = JSON.parse(
