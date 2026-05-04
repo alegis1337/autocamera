@@ -3,8 +3,13 @@ node_modules/
 
 # Runtime data
 screenshots/*.png
+screenshots/*.jpg
 reports/*.html
 logs/*.log
+
+# v2: helpdesk-state (содержит инфу о камерах, локально)
+state/helpdesk-state.json
+state/*.tmp
 
 # OS
 Thumbs.db

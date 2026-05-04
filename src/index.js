@@ -7,6 +7,11 @@
  *   node src/index.js --test-email                — тестовый email
  *   node src/index.js --dry-run --only noviy-ceh  — только одна система
  *   node src/index.js --debug                     — подробные логи
+ *   node src/index.js --reset-state               — обнулить helpdesk-state.json
+ *
+ * v2 features:
+ *   • helpdesk-state в state/helpdesk-state.json — заявки уходят только
+ *     при смене статуса (active↔broken). См. src/state.js.
  */
 
 import fs from 'fs';
@@ -21,6 +26,7 @@ import { checkBewardSystem } from './beward-check.js';
 import { checkRecordingsSystem } from './recordings-check.js';
 import { checkHikvisionMultiSystem } from './hikvision-multi.js';
 import { checkRostelecomSystem } from './rostelecom-check.js';
+import { loadState, saveState, resetState, diffAndUpdate } from './state.js';
 
 // ─── Load .env ────────────────────────────────────────────────────────────────
 const dotenvPath = path.resolve('.env');
@@ -31,15 +37,24 @@ if (fs.existsSync(dotenvPath)) {
 
 // ─── CLI flags ────────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
-const isDryRun    = args.includes('--dry-run');
-const isTestEmail = args.includes('--test-email');
-const isDebug     = args.includes('--debug');
-const onlyId      = (() => {
+const isDryRun     = args.includes('--dry-run');
+const isTestEmail  = args.includes('--test-email');
+const isDebug      = args.includes('--debug');
+const isResetState = args.includes('--reset-state');
+const onlyId       = (() => {
   const idx = args.indexOf('--only');
   return idx >= 0 ? args[idx + 1] : null;
 })();
 
 if (isDebug) log.setLogLevel('DEBUG');
+
+// --reset-state: одноразовая операция, обнуляющая helpdesk-state.json
+// (после её отработки следующий прогон сообщит ВСЕ текущие проблемы как
+// "новые"). Полезно при первом запуске v2 или когда state-файл устарел.
+if (isResetState) {
+  resetState();
+  log.info('state', 'helpdesk-state.json обнулён (--reset-state)');
+}
 
 // ─── TEST_MODE banner (v2 dev environment) ──────────────────────────────────
 // Печатается, если в .env установлено TEST_MODE=true.
@@ -382,22 +397,60 @@ if (!isDryRun) {
       emailFailures++;
     }
   }
-  // Helpdesk-письмо о сломанных камерах
+  // ── Helpdesk: дедупликация через state.js ──────────────────────────────
+  // 1. Текущее множество сломанных камер
+  // 2. Сравниваем со state, получаем diff
+  // 3. Сохраняем новый state в любом случае
+  // 4. Отправляем письмо ТОЛЬКО при наличии изменений (newlyBroken | recovered)
   const brokenCams = collectBrokenCameras(systemResults);
-  if (brokenCams.length > 0) {
-    log.stepStart('helpdesk', `Отправка helpdesk-письма`, { to: process.env.HELPDESK_TO, broken: brokenCams.length });
+  const state = loadState();
+  const diff  = diffAndUpdate(state, brokenCams);
+  saveState(state);
+
+  log.info('helpdesk', 'Дедупликация заявок', {
+    current: brokenCams.length,
+    newlyBroken: diff.newlyBroken.length,
+    recovered:   diff.recovered.length,
+    stillBroken: diff.stillBroken.length,
+  });
+
+  if (diff.newlyBroken.length > 0 || diff.recovered.length > 0) {
+    log.stepStart('helpdesk', 'Отправка helpdesk-письма', {
+      to: process.env.HELPDESK_TO,
+      newlyBroken: diff.newlyBroken.length,
+      recovered:   diff.recovered.length,
+    });
     try {
-      await sendHelpdeskReport({ brokenCams, runMeta: { startTime, durationMs } });
-      log.stepEnd('helpdesk', 'ok', `Helpdesk-письмо отправлено (${brokenCams.length} проблем)`);
+      await sendHelpdeskReport({
+        newlyBroken: diff.newlyBroken,
+        recovered:   diff.recovered,
+        runMeta:     { startTime, durationMs },
+      });
+      log.stepEnd('helpdesk', 'ok',
+        `Helpdesk-письмо отправлено (${diff.newlyBroken.length} новых, ${diff.recovered.length} восстановл.)`);
     } catch (err) {
       log.stepEnd('helpdesk', 'fail', 'Helpdesk-письмо не отправлено', { error: err.message });
       emailFailures++;
     }
+  } else if (diff.stillBroken.length > 0) {
+    log.info('helpdesk',
+      `Изменений нет — helpdesk не дёргаем (${diff.stillBroken.length} камер всё ещё сломаны)`);
   } else {
-    log.info('helpdesk', 'Проблем нет — helpdesk-письмо не отправляется');
+    log.info('helpdesk', 'Все камеры в норме — helpdesk-письмо не нужно');
   }
 } else {
-  log.info('email', 'DRY-RUN: email не отправлен', { groups: groupReports.length, issues: totalIssues });
+  // Даже в dry-run обновляем state, чтобы корректно отдиффить следующий прогон.
+  const brokenCams = collectBrokenCameras(systemResults);
+  const state = loadState();
+  const diff  = diffAndUpdate(state, brokenCams);
+  saveState(state);
+  log.info('email', 'DRY-RUN: email не отправлен', {
+    groups: groupReports.length,
+    issues: totalIssues,
+    newlyBroken: diff.newlyBroken.length,
+    recovered:   diff.recovered.length,
+    stillBroken: diff.stillBroken.length,
+  });
 }
 
 const issueCount = totalIssues;
