@@ -1,0 +1,7 @@
+{
+  "taskName": "AutoCamera Monitor",
+  "startTimeMSK": "10:00",
+  "intervalHours": 0,
+  "intervalMinutes": 0,
+  "comment": "Если intervalHours=0 и intervalMinutes=0 — запуск один раз в день в startTimeMSK. Если задан интервал — повторяется с этим интервалом в течение дня."
+}

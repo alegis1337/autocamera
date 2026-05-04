@@ -1,245 +1,159 @@
-# AutoCamera Monitor — Agent Instructions
-**Version:** 4.0 | **Project:** C:\Users\alegi\Desktop\autocamera
+# AutoCamera Monitor — инструкции для агента
+**Версия:** v1.0 | **Проект:** `C:\Users\dsadmin\Desktop\autocamera`
 
-You are an automated camera monitoring agent running on a **single VM** (Windows 10/11).
-You execute on a schedule via Windows Task Scheduler. **There is no human watching.**
-Complete the full pipeline without asking questions or waiting for input.
+Автоматизированный мониторинг камер: проверяет 9 систем (Европласт + Онлайн),
+формирует HTML-отчёт, рассылает письма заказчику и helpdesk.
+Запуск по расписанию через Планировщик задач Windows — **человек не наблюдает**.
+Работа без интерактивных подтверждений и без ожидания ввода.
 
----
-
-## Your Mission
-
-Check all security cameras across **7 systems** (all via local browser) for:
-1. **Online / Offline** status
-2. **Recording active** (REC indicator)
-3. **Audio / microphone** active
-4. **Recording files** exist and are fresh (folders 5, 9, 11)
-
-Then generate and send an HTML email report with screenshots as evidence.
+Все комментарии и логи — **только на русском**.
 
 ---
 
-## Architecture
+## Архитектура
+
+Вместо браузера и AI-анализа картинок — прямые API и сетевые проверки:
 
 ```
-VM (single machine — OpenClaw + Playwright MCP)
+AutoCamera Monitor (Node.js, ES modules)
 │
-└── Playwright MCP local (stdio) — один браузер, все системы по очереди
-    ├── Ростелеком (lk-b2b.camera.rt.ru) — 8 камер, авторизация сохранена
-    ├── Европласт Офис → iPanda (10.0.120.192) — 14 камер
-    ├── Европласт Склад → HiWatch (10.0.120.30) — 17 камер
-    ├── Новый цех → iPanda (10.0.120.220) — 10 камер
-    ├── Цех выдува → отключен (сервис недоступен)
-    ├── TRASSIR Производство → веб-интерфейс — ~21 камера
-    ├── Онлайн iVMS → веб-интерфейс Hikvision — 3 камеры
-    ├── Онлайн BEWARD → веб-интерфейс BEWARD — 8 камер
-    └── Записи → E:\video\video\{5,9,11}
+├── Европласт (группа "Европласт")
+│   ├── trassir          → TRASSIR SDK HTTP API (10.0.120.195:8080)
+│   ├── ipanda-office    → RTSP DESCRIBE через NVR (10.0.120.192)
+│   ├── hiwatch-sklad    → Hikvision ISAPI (10.0.120.30)
+│   ├── ipanda-noviy-ceh → RTSP DESCRIBE через NVR (10.0.120.220)
+│   ├── evroplast-stroyka→ SMB — проверка свежести файлов записи
+│   └── hiwatch-vyduv    → Hikvision ISAPI (HIWATCH_VYDUV_*)
+│
+└── Онлайн (группа "Онлайн")
+    ├── beward           → SMB freshness (порог 180 мин) + ping
+    ├── ivms             → Hikvision ISAPI per-camera
+    └── rostelecom       → портал lk-b2b.camera.rt.ru (Playwright headless)
 ```
 
-**Одно подключение:** Playwright MCP (stdio) — локальный браузер.
-Все системы проверяются **последовательно** через один Chromium.
+Никакого облачного AI, никаких скриншотов для распознавания. Только
+детерминированные запросы к API / SMB / RTSP / ISAPI. Ростелеком —
+единственный случай, где нужен headless-браузер, т.к. у него нет открытого API.
 
 ---
 
-## Environment
+## Окружение
 
-| Item | Value |
-|------|-------|
-| This machine | VM — Windows 10/11, Node.js, OpenClaw, Playwright MCP |
-| Project root | `C:\Users\alegi\Desktop\autocamera` |
-| Secrets | `.env` file in project root |
-| Camera list | `config\cameras.json` |
-| Settings | `config\settings.json` |
-
----
-
-## Step 0 — Startup
-
-1. Load `.env` (use dotenv or read file directly).
-2. Read `config\cameras.json` → camera list grouped by system.
-3. Read `config\settings.json` → timeouts, retention, recording check settings.
-4. Ensure directories exist: `screenshots\`, `reports\`, `logs\`.
-5. Write to `logs\YYYY-MM-DD.log`:
-   ```
-   [ISO_TIMESTAMP] RUN_START
-   ```
+| Элемент           | Значение                                               |
+|-------------------|--------------------------------------------------------|
+| ОС                | Windows 10/11 (ВМ)                                     |
+| Runtime           | Node.js ≥ 20, ES modules                               |
+| Корень проекта    | `C:\Users\dsadmin\Desktop\autocamera`                  |
+| Секреты           | `.env` (см. `.env.example`)                            |
+| Системы           | `config\systems.json` (9 систем, поле `group`)         |
+| Настройки         | `config\settings.json`                                 |
+| Запуск вручную    | `AutoCamera.bat` → `menu.ps1` (PowerShell UI)          |
+| Запуск cron       | Windows Task Scheduler, `npm start`                    |
 
 ---
 
-## Step 1 — Start Playwright MCP
+## Структура кода (`src/`)
 
-Start Playwright MCP in stdio mode for local browser control.
-All camera systems are checked through this single browser instance.
+| Файл                  | Назначение                                         |
+|-----------------------|----------------------------------------------------|
+| `index.js`            | Основной оркестратор: читает systems.json, диспатчит по `type`, собирает результаты, запускает отчёт |
+| `reporter.js`         | Генерация HTML-отчёта заказчику + отдельные письма helpdesk по группам |
+| `logger.js`           | Логгер (файл + консоль, уровни info/warn/error/debug) |
+| `isapi.js`            | Hikvision/HiWatch ISAPI (digest auth, list каналов, статусы) |
+| `hikvision-multi.js`  | iVMS — пер-камерный ISAPI                           |
+| `trassir-check.js`    | TRASSIR SDK HTTP API (login, channels, signal, kbps)|
+| `rtsp-check.js`       | iPanda — RTSP DESCRIBE через NVR                   |
+| `beward-check.js`     | BEWARD — свежесть SMB-файлов + ping                |
+| `recordings-check.js` | Европласт Стройка — свежесть файлов по SMB          |
+| `smb-utils.js`        | Общие SMB-примитивы                                 |
+| `rostelecom-check.js` | Портал РТ через headless Playwright                |
 
-The MCP client connects via stdio transport:
-```
-npx @playwright/mcp --browser chromium --caps vision --viewport-size 1920x1080
-```
-
-If connection fails → log `MCP_FAIL`, exit 1.
-
----
-
-## Step 2 — Check Camera Systems (sequential)
-
-For each enabled system in `cameras.json`, sequentially:
-1. Navigate to dashboard URL
-2. Login if required
-3. Wait for page to load
-4. Take screenshot
-5. Analyze camera statuses
-6. Move to next system
-
-### 2a. Ростелеком
-
-- URL: `https://lk-b2b.camera.rt.ru/main/cameras`
-- Auth: saved in browser — no login needed
-- Layout: "Все камеры" grid, thumbnails with dates
-- Green indicator = online, Red = offline
-- 8 cameras
-
-### 2b. iPanda — Европласт Офис
-
-- URL: `http://10.0.120.192/`
-- Login: admin / password → "Логин"
-- Menu: Реальный режим (active by default)
-- **Online:** video stream visible
-- **Offline:** black cell, "Нет соединения"
-- **Recording:** red **R** in cell corner
-- **Audio:** red **M** in cell corner
-- ~14 active cameras
-
-### 2c. HiWatch — Европласт Склад
-
-- URL: `http://10.0.120.30/doc/page/login.asp`
-- Login: EfremovOE / password → "Вход"
-- **Online:** video stream with timestamp
-- **Offline:** **"NO VIDEO"** text overlay
-- **Recording:** recording indicator in cell
-- Camera tree: Camera 01–15, IPCamera 01–02
-- Grid: 4×4
-
-### 2d. iPanda — Новый цех
-
-- URL: `http://10.0.120.220/`
-- Login: admin / password → "Логин"
-- Same iPanda UI as Офис
-- **Recording:** red **R**, **Audio:** red **M**
-- ~10 active cameras, Grid: 4×4
-
-### 2e. Цех выдува
-
-**Currently disabled** — camera service is unavailable.
-- Skip entirely.
-- Mark all cameras as `"online": "unknown"`, notes: "Service unavailable".
-
-### 2f. TRASSIR — Европласт Производство
-
-- URL: from `TRASSIR_URL` env var (веб-интерфейс TRASSIR)
-- Login: from `TRASSIR_USER` / `TRASSIR_PASS` env vars
-- **Online:** video stream visible
-- **Offline:** "Нет соединения"
-- **Recording:** red **R** in cell corner
-- ~21 cameras
-
-### 2g. Онлайн — iVMS (Hikvision web)
-
-- URL: from `IVMS_URL` env var (веб-интерфейс Hikvision камер)
-- Login: from `IVMS_USER` / `IVMS_PASS` env vars
-- **Online:** video stream with timestamp
-- **Offline:** gray cell, connection error
-- 3 cameras: aerovokt2, Балахта Т2, Megafon Bal
-
-### 2h. Онлайн — BEWARD
-
-- URL: from `BEWARD_URL` env var (веб-интерфейс BEWARD)
-- Login: from `BEWARD_USER` / `BEWARD_PASS` env vars
-- **Online:** "Подключено"
-- **Offline:** "Ошибка подключения"
-- **Recording:** "постоянно" / "по расписанию"
-- 8 cameras in Group02
+**Удалено в v1.0:** `analyzer.js` (polza.ai vision), `browser.js` (screenshot
+MCP), `ping-check.js` (iPanda ping — заменён на RTSP). В коде не должно
+оставаться упоминаний этих модулей или `POLZA_*` переменных.
 
 ---
 
-## Step 3 — Check Recording Folders
+## Поток выполнения
 
-Recording files stored locally at `E:\video\video\`:
-- Folder **5** — channel 5
-- Folder **9** — channel 9
-- Folder **11** — channel 11
-
-Files pattern: `3_YYYY-MM-DD_HH-mm_NNN`
-Fresh = newest file **not older than 6 hours**.
-
-Check via browser: navigate to `file:///E:/video/video/{folder}/`, analyze dates.
-
-Result: `"ok"` / `"stale"` / `"missing"` / `"error"`
-
----
-
-## Step 4 — Build HTML Report
-
-Generate: `reports\report-YYYYMMDD-HHmmss.html`
-
-**Report structure:**
-```
-┌─────────────────────────────────────────────┐
-│  AutoCamera Monitor Report                  │
-│  Run: 2026-03-16 08:00 | Duration: 3m 45s  │
-│  MCP: Connected                             │
-├─────────────────────────────────────────────┤
-│  SUMMARY (badges)                           │
-├─────────────────────────────────────────────┤
-│  ⚠ ALERTS                                  │
-├─────────────────────────────────────────────┤
-│  ── Ростелеком ──                           │
-│  ── Европласт Офис (iPanda) ──              │
-│  ── Европласт Склад (HiWatch) ──           │
-│  ── Новый цех (iPanda) ──                   │
-│  ── TRASSIR Производство ──                 │
-│  ── Онлайн iVMS ──                          │
-│  ── Онлайн BEWARD ──                        │
-│  ── Recording Files ──                      │
-├─────────────────────────────────────────────┤
-│  Footer                                     │
-└─────────────────────────────────────────────┘
-```
-
-**Alert rules:**
-- Camera offline → red alert
-- "NO VIDEO" / "Нет соединения" → red alert
-- Not recording AND `expectedRecording = true` → orange alert
-- `critical = true` AND offline → bold red ⚠
-- Recording folder stale (>6h) → orange alert
-- Recording folder missing/empty → red alert
+1. **Startup** — читаем `.env` и `config/systems.json`, создаём папки
+   `logs/`, `reports/`.
+2. **Проверка систем** — по очереди для каждой `enabled: true` системы:
+   - диспатч по `sys.type` (trassir-sdk, ipanda-rtsp, hiwatch/hikvision,
+     smb-recordings, beward-smb, hikvision-multi, rt-portal);
+   - результат: `{ id, name, group, cameras: [...], error, aiSummary }`;
+   - ошибка одной системы не валит весь прогон — продолжаем дальше.
+3. **Отчёт** (`reporter.js`):
+   - HTML-письмо заказчику со сводкой, цветной легендой, таблицами/гридами
+     по каждой системе;
+   - **отдельные** письма helpdesk: одно на группу ("Европласт", "Онлайн").
+     Тема: `[HELPDESK] <группа> — проблемы камер DD.MM.YYYY (N шт.)`;
+   - helpdesk игнорирует камеры из `sys.helpdeskIgnore` и
+     `sys.unusedChannels`.
+4. **Письмо** — `nodemailer` через SMTP (Яндекс). Для анти-спама задаются
+   `Message-ID`, `text/plain` alternative, заголовок `X-Mailer`. При 550
+   SPAM — логируем и сохраняем отчёт локально.
+5. **Завершение** — `RUN_END | duration=… | systems=N | issues=N`, `exit 0/1`.
 
 ---
 
-## Step 5 — Send Email Report
+## Семантика статусов
 
-Use nodemailer with settings from `.env`.
+| Значение `online` | Отображение      | Смысл                                      |
+|-------------------|------------------|--------------------------------------------|
+| `true`            | зелёный квадрат  | камера в сети, проверка прошла успешно     |
+| `false`           | красный квадрат  | камера недоступна / API вернул ошибку      |
+| `null`            | серый квадрат    | "не используется" / нет данных (из конфига)|
+| `'unknown'`       | серый квадрат    | проверка не смогла дать достоверный ответ  |
 
-- **Subject:** `[AutoCamera] Report YYYY-MM-DD HH:MM — N issues`
-- **Body:** inline HTML report
-- **Attachments:** grid overview screenshots
-
-Retry: once after 30s. If fails → save report locally, exit 1.
-
----
-
-## Step 6 — Cleanup and Exit
-
-1. Delete old screenshots/reports/logs per retention settings.
-2. Close MCP connection.
-3. Log: `RUN_END | duration=Xs | cameras=N | recordings=N | issues=N`
-4. Exit 0 on success, 1 on hard failure.
+В письме заказчика блок с цветной легендой размещён между системами и
+футером — объясняет значение квадратов и суммарных бейджей `N/N online`.
 
 ---
 
-## Error Handling Rules
+## Правила для helpdesk-писем
 
-- **Never** prompt for user input.
-- **Never** hang indefinitely.
-- Single camera/dashboard failure → log, skip, continue.
-- MCP connection failure → exit 1.
-- SMTP failure → save report locally, exit 1.
+- Пишем **по одному письму на группу**. Группа берётся из поля `group`
+  конкретной системы (`"Европласт"` / `"Онлайн"`).
+- Если в группе нет проблемных камер — письмо по ней не отправляется.
+- Камеры, занесённые в `helpdeskIgnore` / `unusedChannels` своей системы,
+  в helpdesk-письма не попадают.
+- Для BEWARD "мерцание" (файлы появляются с паузами) — норма; в helpdesk
+  попадают только длительно offline камеры (по freshness ≥ 180 мин).
+
+---
+
+## Переменные окружения
+
+Полный список — в `.env.example`. Кратко:
+
+- `SMTP_*`, `REPORT_TO`, `HELPDESK_TO` — почта.
+- `TRASSIR_USER/PASS`.
+- `HIWATCH_SKLAD_*`, `HIWATCH_VYDUV_*`.
+- `STROYKA_SMB_USER/PASS`, `BEWARD_SMB_USER/PASS`.
+- `IVMS_AERO_*`, `IVMS_T2_*`, `IVMS_MEGAFON_*`.
+- `RT_PORTAL_URL/USER/PASS`.
+
+**Больше не используются** (удалены из кода): `POLZA_API_KEY`,
+`POLZA_MODEL`, `REPORT_FROM`, `NOVIY_CEH_*`, `TRASSIR_URL`, `IVMS_URL`,
+`BEWARD_URL`.
+
+---
+
+## Правила поведения агента
+
+- **Не** запрашивать интерактивный ввод.
+- **Не** зависать: у каждого сетевого вызова должен быть таймаут.
+- Ошибка одной камеры / системы — залогировать и продолжить.
+- Критический сбой SMTP — сохранить отчёт локально, `exit 1`.
+- Комментарии и сообщения логов — на русском.
+- Никогда не ломать обратную совместимость полей результата (`cameras[i].online`,
+  `recording`, `audio`, `notes`, `index`) — их читает `reporter.js`.
+
+---
+
+## Актуальная версия
+
+**v1.0** — зафиксирована в `menu.ps1` (`$Version = "v1.0"`) и отображается
+в шапке меню. При значимых изменениях поведения/набора систем — бамп
+версии и обновление этого файла.

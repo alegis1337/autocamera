@@ -4,10 +4,55 @@
 
 import fs from 'fs';
 import path from 'path';
+import dns from 'dns';
 import nodemailer from 'nodemailer';
+import { randomUUID } from 'crypto';
+
+// На этой VM системный DNS-сервер — 127.0.0.1 (битый локальный резолвер),
+// из-за чего dns.resolve4 падает с queryA ETIMEOUT при отправке через nodemailer.
+// Принудительно используем публичные DNS.
+try { dns.setServers(['1.1.1.1', '8.8.8.8']); } catch {}
+
+/**
+ * Извлекает домен из SMTP-пользователя (efremovoe@dc1c.ru → dc1c.ru).
+ * Используется для генерации Message-ID.
+ */
+function senderDomain() {
+  const user = process.env.SMTP_USER || '';
+  const at = user.indexOf('@');
+  return at >= 0 ? user.slice(at + 1) : 'autocamera.local';
+}
+
+/**
+ * Убирает HTML-теги, оставляя текстовое содержимое — для text/plain версии.
+ */
+function htmlToPlainText(html) {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/tr>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<\/h[1-6]>/gi, '\n\n')
+    .replace(/<th[^>]*>/gi, '\t')
+    .replace(/<td[^>]*>/gi, '\t')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#\d+;/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
 
 const ROOT = path.resolve('.');
 const REPORTS_DIR = path.join(ROOT, 'reports');
+
+// Группы, по которым формируются отдельные письма.
+export const REPORT_GROUPS = ['Европласт', 'Онлайн'];
 
 /**
  * Builds and saves an HTML report.
@@ -17,156 +62,363 @@ const REPORTS_DIR = path.join(ROOT, 'reports');
  * @param {object} params.runMeta        - { startTime, durationMs }
  * @returns {string} absolute path to saved HTML file
  */
-export function buildReport({ systemResults, runMeta }) {
+export function buildReport({ systemResults, runMeta, group }) {
   fs.mkdirSync(REPORTS_DIR, { recursive: true });
+
+  // Если задана конкретная группа — фильтруем по ней.
+  // Иначе берём все группы из REPORT_GROUPS, или всё (для тестов).
+  let filtered;
+  if (group) {
+    filtered = systemResults.filter(s => (s.group || '') === group);
+  } else {
+    filtered = systemResults.filter(s => REPORT_GROUPS.includes(s.group || ''));
+    if (filtered.length === 0) filtered = systemResults;
+  }
 
   const ts = new Date(runMeta.startTime)
     .toISOString().replace(/[:.]/g, '-').replace('T', '-').slice(0, 19);
-  const reportPath = path.join(REPORTS_DIR, `report-${ts}.html`);
-  const runDate = new Date(runMeta.startTime).toLocaleString('ru-RU');
-  const durationSec = Math.round((runMeta.durationMs || 0) / 1000);
-  const durationMin = Math.floor(durationSec / 60);
-  const durationRemSec = durationSec % 60;
+  const groupSlug = group ? `-${group.toLowerCase().replace(/[^a-zа-я0-9]+/gi, '_')}` : '';
+  const reportPath = path.join(REPORTS_DIR, `report-${ts}${groupSlug}.html`);
 
-  // Aggregate totals
-  let totalCams = 0, totalOnline = 0, totalOffline = 0, totalUnknown = 0;
-  const allIssues = [];
+  const startDate = new Date(runMeta.startTime);
+  const dd = String(startDate.getDate()).padStart(2, '0');
+  const mm = String(startDate.getMonth() + 1).padStart(2, '0');
+  const yyyy = startDate.getFullYear();
+  const dateStr = `${dd}.${mm}.${yyyy}`;
 
-  for (const sys of systemResults) {
-    for (const cam of sys.cameras) {
-      totalCams++;
-      if (cam.online === true) totalOnline++;
-      else if (cam.online === false) { totalOffline++; allIssues.push({ sys, cam }); }
-      else totalUnknown++;
-      if (cam.recording === false) allIssues.push({ sys, cam, issue: 'not_recording' });
-    }
-    if (sys.error) allIssues.push({ sys, cam: null, issue: 'system_error' });
-  }
+  // "Производство (TRASSIR)" → "Производство"
+  const shortSysName = (n) => (n || '').replace(/\s*\([^)]*\)\s*$/, '').trim();
 
-  const icon = (val) => {
-    if (val === true)  return '<span class="ok">&#10004;</span>';
-    if (val === false) return '<span class="err">&#10008;</span>';
-    return '<span class="unk">?</span>';
+  // "CH10" → "10", "Camera 01" → "1", "IPCamera 02" → "IP2"
+  const shortCamLabel = (cam) => {
+    const n = cam.name || `${(cam.index ?? 0) + 1}`;
+    let m = n.match(/^CH0*(\d+)$/i);          if (m) return m[1];
+    m = n.match(/^Camera\s+0*(\d+)$/i);       if (m) return m[1];
+    m = n.match(/^IPCamera\s+0*(\d+)$/i);     if (m) return `IP${m[1]}`;
+    return n;
   };
 
-  // Alerts section
-  const alertRows = [...new Map(
-    allIssues.map(i => [i.sys.id + (i.cam?.index ?? 'sys'), i])
-  ).values()].map(({ sys, cam, issue }) => {
-    if (!cam) {
-      return `<tr class="row-err"><td colspan="4"><strong>${sys.name}</strong> — Ошибка: ${sys.error}</td></tr>`;
+  // Канал в списке "не используется"? Сравниваем по cam.id (1-based) или index+1.
+  const isUnused = (sys, cam) => {
+    const list = sys.unusedChannels || [];
+    if (list.length === 0) return false;
+    const ch = cam.id != null ? cam.id : (cam.index ?? 0) + 1;
+    return list.includes(ch);
+  };
+
+  // ── Секция «Не работают камеры» ─────────────────────────────────────────────
+  // Неиспользуемые каналы пропускаем; реальные сломанные — попадают сюда.
+  const offlineBlocks = filtered.map(sys => {
+    if (sys.error) {
+      return `<div class="off-row"><span class="off-sys">${shortSysName(sys.name)}:</span> <span class="off-err">ошибка проверки — ${sys.error}</span></div>`;
     }
-    const issueText = issue === 'not_recording'
-      ? 'Запись не идёт'
-      : 'Камера offline';
-    return `<tr class="row-err">
-      <td>${sys.name}</td>
-      <td>Камера ${cam.index + 1}</td>
-      <td>${issueText}</td>
-      <td>${cam.notes || ''}</td>
-    </tr>`;
-  }).join('\n');
+    const offlineCams = sys.cameras.filter(c => c.online === false && !isUnused(sys, c));
+    if (offlineCams.length === 0) return '';
+    const list = offlineCams.map(c => `${shortCamLabel(c)} — недоступна`).join(', ');
+    return `<div class="off-row"><span class="off-sys">${shortSysName(sys.name)}:</span> ${list}</div>`;
+  }).filter(Boolean).join('\n');
 
-  // Per-system sections
-  const systemSections = systemResults.map(sys => {
-    const shotHtml = sys.screenshotPath && fs.existsSync(sys.screenshotPath)
-      ? `<img src="data:image/png;base64,${fs.readFileSync(sys.screenshotPath).toString('base64')}"
-           style="max-width:100%;border:1px solid #334155;border-radius:6px;margin:8px 0;" />`
-      : '<p style="color:#64748b">Скриншот недоступен</p>';
+  const offlineHtml = offlineBlocks
+    || '<div class="all-good">&#10004; Все камеры работают штатно.</div>';
 
-    const onlineCount = sys.cameras.filter(c => c.online === true).length;
-    const total = sys.cameras.length;
+  // ── Секция «Запись» — одна общая строка ────────────────────────────────────
+  // Не пишет = recording === false при online === true (без неиспользуемых)
+  const notRecording = [];
+  for (const sys of filtered) {
+    if (sys.error) continue;
+    for (const c of sys.cameras) {
+      if (isUnused(sys, c)) continue;
+      if (c.recording === false && c.online === true) {
+        notRecording.push(`${shortSysName(sys.name)} — ${shortCamLabel(c)}`);
+      }
+    }
+  }
+  const recordingHtml = notRecording.length === 0
+    ? '<div class="rec-row">Запись ведётся на всех рабочих камерах.</div>'
+    : `<div class="rec-row err">Нет записи: ${notRecording.join(', ')}.</div>`;
 
-    const camRows = sys.cameras.map(cam => `
-      <tr>
-        <td>Камера ${cam.index + 1}</td>
-        <td>${icon(cam.online)}</td>
-        <td>${icon(cam.recording)}</td>
-        <td>${icon(cam.audio)}</td>
-        <td style="font-size:0.8em;color:#94a3b8">${cam.notes || ''}</td>
-      </tr>`).join('\n');
+  // ── Секция «Диагностика» (только браузер) ──────────────────────────────────
+  let diagnosticHtml = '';
+  if (!group) {
+    const diagItems = [];
+    for (const sys of filtered) {
+      // Ошибки системы
+      if (sys.error) {
+        diagItems.push({
+          system: shortSysName(sys.name),
+          level: 'error',
+          message: sys.error,
+        });
+      }
+      // Проблемные камеры с заметками
+      for (const cam of sys.cameras) {
+        if (isUnused(sys, cam)) continue;
+        if (cam.online === false && cam.notes) {
+          diagItems.push({
+            system: shortSysName(sys.name),
+            level: 'warn',
+            message: `${cam.name || 'Камера ' + ((cam.index ?? 0) + 1)}: ${cam.notes}`,
+          });
+        }
+      }
+    }
+
+    if (diagItems.length > 0) {
+      const diagRows = diagItems.map(d => {
+        const icon = d.level === 'error' ? '&#9888;' : '&#9679;';
+        const color = d.level === 'error' ? '#c53030' : '#dd6b20';
+        return `<tr style="border-bottom:1px solid #e2e8f0;">
+          <td style="padding:4px 8px;font-size:12px;font-weight:600;color:#2c5282;white-space:nowrap;vertical-align:top;">${d.system}</td>
+          <td style="padding:4px 8px;font-size:12px;color:${color};"><span style="margin-right:4px;">${icon}</span>${d.message}</td>
+        </tr>`;
+      }).join('');
+
+      diagnosticHtml = `
+<div class="section-title">Диагностика</div>
+<table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;font-family:Arial,sans-serif;margin-bottom:12px;">
+  <tr style="background:#edf2f7;">
+    <th style="padding:4px 8px;font-size:11px;text-align:left;font-weight:600;color:#4a5568;">Система</th>
+    <th style="padding:4px 8px;font-size:11px;text-align:left;font-weight:600;color:#4a5568;">Проблема</th>
+  </tr>
+  ${diagRows}
+</table>`;
+    }
+  }
+
+  // ── Сетки по системам ───────────────────────────────────────────────────────
+  function gridLabel(name) {
+    if (!name) return '?';
+    const m = name.match(/^Camera\s+0*(\d+)$/i);
+    return m ? `CH${m[1]}` : name;
+  }
+
+  // Полный отчёт (браузер) — без группы; email — с группой
+  const isBrowserReport = !group;
+
+  let lastGroup = null;
+  const systemSections = filtered.map(sys => {
+    const usedCams = sys.cameras.filter(c => !isUnused(sys, c));
+    const onlineCount = usedCams.filter(c => c.online === true).length;
+    const activeTotal = usedCams.filter(c => c.online !== null).length;
+    const cols = sys.gridColumns || 5;
+
+    const groupName = sys.group || '';
+    let groupHeader = '';
+    if (groupName && groupName !== lastGroup) {
+      groupHeader = `<div style="background:#1a365d;color:#ffffff;font-size:11px;font-weight:700;letter-spacing:0.5px;padding:4px 8px;margin:8px 0 4px;border-radius:3px;font-family:Arial,sans-serif;">${groupName.toUpperCase()}</div>`;
+      lastGroup = groupName;
+    }
 
     const errorHtml = sys.error
-      ? `<p style="color:#f97316">&#9888; Ошибка: ${sys.error}</p>`
+      ? `<p style="color:#c53030;font-size:12px;margin:4px 0;font-family:Arial,sans-serif;">&#9888; ${sys.error}</p>`
       : '';
 
-    const summaryHtml = sys.aiSummary
-      ? `<p style="color:#94a3b8;font-size:0.85em;margin:4px 0">${sys.aiSummary}</p>`
+    const badgeBg = onlineCount === activeTotal ? '#c6f6d5' : '#fed7d7';
+    const badgeFg = onlineCount === activeTotal ? '#276749' : '#c53030';
+
+    // Email-friendly: настоящая HTML-таблица вместо CSS grid (Gmail режет display:grid)
+    const cellWidth = `${Math.floor(100 / cols)}%`;
+    const rows = [];
+    for (let i = 0; i < sys.cameras.length; i += cols) {
+      const chunk = sys.cameras.slice(i, i + cols);
+      const tds = chunk.map(cam => {
+        // Камера с картинкой, но без записи → оранжевый (предупреждение)
+        const noRec = cam.online === true && cam.recording === false;
+        const bg = isUnused(sys, cam)   ? '#a0aec0'
+                 : cam.online === false ? '#e53e3e'
+                 : noRec                ? '#dd6b20'
+                 : cam.online === true  ? '#2f855a'
+                 :                        '#a0aec0';
+        const label = gridLabel(cam.name) + (noRec ? ' <span style="font-size:8px;vertical-align:top;">⚠</span>' : '');
+        return `<td width="${cellWidth}" align="center" bgcolor="${bg}" style="padding:3px 2px;color:#ffffff;font-weight:700;font-size:10px;border:1px solid #ffffff;line-height:1.1;">${label}</td>`;
+      });
+      while (tds.length < cols) tds.push(`<td width="${cellWidth}" style="border:1px solid #ffffff;"></td>`);
+      rows.push(`<tr>${tds.join('')}</tr>`);
+    }
+    const gridHtml = sys.cameras.length > 0
+      ? `<table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;background:#ffffff;table-layout:fixed;">${rows.join('')}</table>`
       : '';
 
-    return `
-    <div class="system-block">
-      <h2>${sys.name} <span class="badge ${onlineCount === total ? 'badge-ok' : 'badge-warn'}">${onlineCount}/${total} online</span></h2>
+    // ── Подробная таблица камер (только для браузерного отчёта) ──
+    let detailHtml = '';
+    if (isBrowserReport) {
+      const problemCams = sys.cameras.filter(c => !isUnused(sys, c) && (c.online === false || c.recording === false || c.online === null));
+      const infoCams = sys.cameras.filter(c => !isUnused(sys, c) && c.notes && c.online === true);
+
+      if (problemCams.length > 0 || sys.error) {
+        const problemRows = problemCams.map(cam => {
+          const status = cam.online === false ? '<span style="color:#e53e3e;font-weight:700;">OFFLINE</span>'
+                       : cam.online === null  ? '<span style="color:#a0aec0;">Н/Д</span>'
+                       : '<span style="color:#2f855a;">online</span>';
+          const rec = cam.recording === false ? '<span style="color:#e53e3e;">нет</span>'
+                    : cam.recording === true  ? '<span style="color:#2f855a;">да</span>'
+                    : '<span style="color:#a0aec0;">—</span>';
+          const reason = cam.notes || 'причина неизвестна';
+          return `<tr style="border-bottom:1px solid #e2e8f0;">
+            <td style="padding:3px 6px;font-size:11px;">${cam.name || gridLabel(cam.name)}</td>
+            <td style="padding:3px 6px;font-size:11px;text-align:center;">${status}</td>
+            <td style="padding:3px 6px;font-size:11px;text-align:center;">${rec}</td>
+            <td style="padding:3px 6px;font-size:11px;color:#4a5568;">${reason}</td>
+          </tr>`;
+        }).join('');
+
+        detailHtml = `
+        <table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;margin-top:2px;font-family:Arial,sans-serif;">
+          <tr style="background:#edf2f7;">
+            <th style="padding:3px 6px;font-size:10px;text-align:left;font-weight:600;color:#4a5568;">Камера</th>
+            <th style="padding:3px 6px;font-size:10px;text-align:center;font-weight:600;color:#4a5568;">Статус</th>
+            <th style="padding:3px 6px;font-size:10px;text-align:center;font-weight:600;color:#4a5568;">Запись</th>
+            <th style="padding:3px 6px;font-size:10px;text-align:left;font-weight:600;color:#4a5568;">Причина / заметки</th>
+          </tr>
+          ${problemRows}
+        </table>`;
+      }
+
+      // Краткая сводка по работающим камерам с заметками (запись, возраст и т.п.)
+      if (infoCams.length > 0 && infoCams.some(c => c.recording === true || c.recordingAge)) {
+        const infoRows = infoCams.filter(c => c.notes).map(cam => {
+          const rec = cam.recording === true ? '<span style="color:#2f855a;">да</span>' : '<span style="color:#a0aec0;">—</span>';
+          return `<tr style="border-bottom:1px solid #f7fafc;">
+            <td style="padding:2px 6px;font-size:10px;">${cam.name || gridLabel(cam.name)}</td>
+            <td style="padding:2px 6px;font-size:10px;text-align:center;">${rec}</td>
+            <td style="padding:2px 6px;font-size:10px;color:#718096;">${cam.notes}</td>
+          </tr>`;
+        }).join('');
+        if (infoRows) {
+          detailHtml += `
+          <table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;margin-top:2px;font-family:Arial,sans-serif;opacity:0.85;">
+            <tr style="background:#f7fafc;">
+              <th style="padding:2px 6px;font-size:9px;text-align:left;color:#a0aec0;">Камера</th>
+              <th style="padding:2px 6px;font-size:9px;text-align:center;color:#a0aec0;">Зап.</th>
+              <th style="padding:2px 6px;font-size:9px;text-align:left;color:#a0aec0;">Инфо</th>
+            </tr>
+            ${infoRows}
+          </table>`;
+        }
+      }
+    }
+
+    // Метод проверки (только браузер)
+    const methodLabel = isBrowserReport && sys.aiSummary
+      ? `<span style="font-size:9px;color:#a0bcc8;margin-left:6px;font-weight:400;">${sys.aiSummary}</span>`
+      : '';
+
+    return `${groupHeader}
+    <div style="margin-bottom:8px;border:1px solid #e2e8f0;border-radius:3px;overflow:hidden;font-family:Arial,sans-serif;">
+      <div style="background:#2c5282;color:#ffffff;font-size:12px;font-weight:700;padding:5px 10px;">
+        ${shortSysName(sys.name)}
+        <span style="font-size:10px;padding:1px 7px;border-radius:9px;font-weight:600;margin-left:6px;background:${badgeBg};color:${badgeFg};">${onlineCount}/${activeTotal} online</span>
+        ${methodLabel}
+      </div>
       ${errorHtml}
-      ${summaryHtml}
-      ${shotHtml}
-      ${total > 0 ? `<table>
-        <tr><th>Камера</th><th>Online</th><th>Запись</th><th>Звук</th><th>Примечания</th></tr>
-        ${camRows}
-      </table>` : ''}
+      ${gridHtml}
+      ${detailHtml}
     </div>`;
   }).join('\n');
-
-  const issueCount = allIssues.length;
-  const statusColor = issueCount === 0 ? '#22c55e' : '#ef4444';
 
   const html = `<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<title>AutoCamera ${runDate}</title>
+<title>Отчёт по видеонаблюдению ${dateStr}</title>
 <style>
-  body { font-family: system-ui, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; padding:20px; }
-  h1   { color:#f8fafc; margin-bottom:4px; }
-  h2   { color:#94a3b8; font-size:1rem; margin:28px 0 8px; border-bottom:1px solid #1e293b; padding-bottom:6px; }
-  .meta { color:#64748b; font-size:0.85rem; margin-bottom:20px; }
-  .summary { display:flex; gap:14px; flex-wrap:wrap; margin-bottom:24px; }
-  .badge-block { background:#1e293b; border-radius:8px; padding:12px 20px; text-align:center; }
-  .badge-block .num { font-size:2rem; font-weight:700; }
-  .badge-block .lbl { font-size:0.75rem; color:#64748b; }
-  .green { color:#22c55e; } .red { color:#ef4444; } .orange { color:#f97316; }
-  .ok  { color:#22c55e; font-size:1.1em; }
-  .err { color:#ef4444; font-size:1.1em; }
-  .unk { color:#64748b; }
-  table { border-collapse:collapse; width:100%; margin:8px 0 16px; }
-  th { background:#1e293b; padding:8px 12px; text-align:left; font-size:0.8rem; color:#94a3b8; }
-  td { padding:8px 12px; border-top:1px solid #1e293b; }
-  .row-err td { background:#3b0d0d; }
-  .badge { font-size:0.75rem; padding:2px 8px; border-radius:12px; font-weight:600; margin-left:8px; }
-  .badge-ok   { background:#14532d; color:#4ade80; }
-  .badge-warn { background:#431407; color:#fb923c; }
-  .system-block { margin-bottom:32px; }
-  .alerts { background:#1a0a0a; border:1px solid #7f1d1d; border-radius:8px; padding:16px; margin-bottom:24px; }
-  .alerts h2 { color:#f87171; margin-top:0; border-bottom-color:#7f1d1d; }
-  footer { margin-top:32px; font-size:0.75rem; color:#475569; border-top:1px solid #1e293b; padding-top:16px; }
+  body { font-family: Georgia, "Times New Roman", serif; background:#ffffff; color:#1a202c; margin:0; padding:18px; max-width:720px; line-height:1.5; }
+  .greeting { font-size:1rem; margin-bottom:6px; }
+  .lead     { font-size:1.05rem; margin:6px 0 18px; font-weight:600; color:#1a365d; }
+  .section-title { font-size:1rem; font-weight:700; color:#1a365d; margin:18px 0 6px; border-bottom:2px solid #1a365d; padding-bottom:3px; }
+  .off-row  { padding:4px 0; font-size:0.95rem; }
+  .off-sys  { font-weight:700; color:#2c5282; }
+  .off-err  { color:#c53030; }
+  .all-good { color:#276749; font-size:0.95rem; padding:4px 0; }
+  .rec-row  { padding:4px 0; font-size:0.95rem; }
+  .rec-row.err { color:#c53030; }
+  .rec-sys  { font-weight:700; color:#2c5282; }
+
+  /* Сетки систем */
+  .systems-wrap { font-family: system-ui, Arial, sans-serif; margin-top:18px; }
+  .system-block { margin-bottom:10px; border:1px solid #e2e8f0; border-radius:4px; overflow:hidden; }
+  .group-header { background:#1a365d; color:#ffffff; font-size:0.85rem; font-weight:700; letter-spacing:0.6px; padding:7px 12px; border-radius:4px; margin:14px 0 6px; }
+  .system-head  { background:#2c5282; color:#ffffff; font-size:0.82rem; font-weight:700; padding:6px 10px; }
+  .badge { font-size:0.68rem; padding:2px 8px; border-radius:10px; font-weight:600; margin-left:6px; vertical-align:middle; }
+  .badge-ok   { background:#c6f6d5; color:#276749; }
+  .badge-warn { background:#fed7d7; color:#c53030; }
+  .cam-grid { display:grid; gap:4px; padding:6px; background:#ffffff; }
+  .cam-cell { padding:9px 4px; text-align:center; border-radius:3px; font-weight:700; font-size:0.78rem; line-height:1.1; color:#ffffff; }
+  .cam-on  { background:#2f855a; }
+  .cam-off { background:#e53e3e; }
+  .cam-unk { background:#a0aec0; font-weight:500; }
+
+  .signature { margin-top:28px; padding-top:14px; border-top:1px solid #e2e8f0; font-size:0.95rem; line-height:1.5; }
+  .signature .name { font-weight:700; }
+  .signature .company { font-style:italic; color:#4a5568; }
 </style>
 </head>
 <body>
-<h1>AutoCamera Monitor</h1>
-<div class="meta">
-  Запуск: ${runDate} &nbsp;|&nbsp;
-  Длительность: ${durationMin}м ${durationRemSec}с &nbsp;|&nbsp;
-  <span style="color:${statusColor}">Проблем: ${issueCount}</span>
-</div>
 
-<div class="summary">
-  <div class="badge-block"><div class="num">${totalCams}</div><div class="lbl">Всего камер</div></div>
-  <div class="badge-block"><div class="num green">${totalOnline}</div><div class="lbl">Online</div></div>
-  <div class="badge-block"><div class="num red">${totalOffline}</div><div class="lbl">Offline</div></div>
-  <div class="badge-block"><div class="num orange">${totalUnknown}</div><div class="lbl">Неизвестно</div></div>
-</div>
+<div class="greeting">Добрый день!</div>
+<div class="lead">Отчёт по видеонаблюдению на ${dateStr}</div>
+${isBrowserReport ? `<div style="font-size:0.8rem;color:#718096;margin-bottom:12px;">Проверка: ${new Date(runMeta.startTime).toLocaleTimeString('ru-RU')} | Длительность: ${Math.round(runMeta.durationMs / 1000)} сек | Систем: ${filtered.length}</div>` : ''}
 
-${issueCount > 0 ? `<div class="alerts">
-  <h2>&#9888; Проблемы (${issueCount})</h2>
-  <table>
-    <tr><th>Система</th><th>Камера</th><th>Проблема</th><th>Примечание</th></tr>
-    ${alertRows}
-  </table>
-</div>` : '<div style="color:#22c55e;margin-bottom:24px;font-size:1.1em">&#10004; Все камеры работают нормально</div>'}
+<div class="section-title">Не работают камеры</div>
+${offlineHtml}
 
+<div class="section-title">Запись</div>
+${recordingHtml}
+
+${diagnosticHtml}
+
+<div class="systems-wrap" style="max-width:${isBrowserReport ? '720' : '520'}px;">
 ${systemSections}
+</div>
 
-<footer>Отчёт: ${reportPath}</footer>
+<div class="section-title" style="margin-top:18px;">Обозначения в сетках камер</div>
+<table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;font-family:Arial,sans-serif;margin-top:6px;">
+  <tr>
+    <td style="padding:3px 8px 3px 0;vertical-align:middle;">
+      <span style="display:inline-block;width:14px;height:14px;background:#2f855a;border:1px solid #ffffff;vertical-align:middle;"></span>
+    </td>
+    <td style="padding:3px 16px 3px 4px;font-size:12px;color:#2d3748;vertical-align:middle;">зелёный — камера онлайн, передаёт видео</td>
+  </tr>
+  <tr>
+    <td style="padding:3px 8px 3px 0;vertical-align:middle;">
+      <span style="display:inline-block;width:14px;height:14px;background:#e53e3e;border:1px solid #ffffff;vertical-align:middle;"></span>
+    </td>
+    <td style="padding:3px 16px 3px 4px;font-size:12px;color:#2d3748;vertical-align:middle;">красный — камера офлайн, не передаёт видео или нет сигнала</td>
+  </tr>
+  <tr>
+    <td style="padding:3px 8px 3px 0;vertical-align:middle;">
+      <span style="display:inline-block;width:14px;height:14px;background:#dd6b20;border:1px solid #ffffff;vertical-align:middle;text-align:center;color:#ffffff;font-weight:700;font-size:9px;line-height:14px;">⚠</span>
+    </td>
+    <td style="padding:3px 16px 3px 4px;font-size:12px;color:#2d3748;vertical-align:middle;">оранжевый со знаком ⚠ — картинка есть, но записи нет (или запись устарела)</td>
+  </tr>
+  <tr>
+    <td style="padding:3px 8px 3px 0;vertical-align:middle;">
+      <span style="display:inline-block;width:14px;height:14px;background:#a0aec0;border:1px solid #ffffff;vertical-align:middle;"></span>
+    </td>
+    <td style="padding:3px 16px 3px 4px;font-size:12px;color:#2d3748;vertical-align:middle;">серый — канал не используется или статус неизвестен</td>
+  </tr>
+  <tr>
+    <td style="padding:3px 8px 3px 0;vertical-align:middle;">
+      <span style="display:inline-block;padding:1px 7px;background:#c6f6d5;color:#276749;border-radius:9px;font-size:10px;font-weight:600;font-family:Arial,sans-serif;">N/N online</span>
+    </td>
+    <td style="padding:3px 16px 3px 4px;font-size:12px;color:#2d3748;vertical-align:middle;">зелёный бейдж — все камеры системы работают</td>
+  </tr>
+  <tr>
+    <td style="padding:3px 8px 3px 0;vertical-align:middle;">
+      <span style="display:inline-block;padding:1px 7px;background:#fed7d7;color:#c53030;border-radius:9px;font-size:10px;font-weight:600;font-family:Arial,sans-serif;">N/M online</span>
+    </td>
+    <td style="padding:3px 16px 3px 4px;font-size:12px;color:#2d3748;vertical-align:middle;">красный бейдж — часть камер в системе не работает</td>
+  </tr>
+</table>
+
+<div class="signature">
+С уважением,<br>
+специалист технической поддержки<br><br>
+<span class="name">Ефремов Олег</span><br>
+<span class="company">ГК «Цифровая Сибирь»</span><br>
++7 906 916-08-80
+</div>
+
 </body>
 </html>`;
 
@@ -183,35 +435,333 @@ ${systemSections}
  * @param {number} params.runTime
  * @param {Array}  params.screenshotPaths - list of screenshot file paths for attachments
  */
-export async function sendReport({ reportPath, issueCount, runTime, screenshotPaths = [] }) {
+export async function sendReport({ reportPath, issueCount, runTime, screenshotPaths = [], groupLabel = '' }) {
   const html = fs.readFileSync(reportPath, 'utf8');
-  const dateStr = new Date(runTime).toISOString().slice(0, 16).replace('T', ' ');
-  const subject = `[AutoCamera] ${dateStr} — ${issueCount} проблем${issueCount === 1 ? 'а' : issueCount >= 2 && issueCount <= 4 ? 'ы' : ''}`;
+  const d = new Date(runTime);
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  const labelPart = groupLabel ? ` (${groupLabel})` : '';
+  const subject = `Отчет по видеонаблюдению${labelPart} — ${dd}.${mm}.${yyyy}`;
+
+  const smtpHost = process.env.SMTP_HOST;
+  const smtpPort = parseInt(process.env.SMTP_PORT || '587');
+  const smtpSecure = process.env.SMTP_SECURE === 'true';
+
+  // На этой VM системный DNS-резолвер сломан (127.0.0.1 не отвечает на queryA),
+  // поэтому nodemailer/c-ares не может зарезолвить хост сам.
+  // Резолвим через dns.lookup (использует ОС-резолвер, работает) и передаём
+  // готовый IP, а имя хоста — в tls.servername для корректного SNI.
+  const lookup = (host) => new Promise((resolve, reject) => {
+    dns.lookup(host, { family: 4 }, (err, addr) => err ? reject(err) : resolve(addr));
+  });
+  const smtpIp = await lookup(smtpHost);
 
   const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: parseInt(process.env.SMTP_PORT || '587'),
-    secure: process.env.SMTP_SECURE === 'true',
+    host: smtpIp,
+    port: smtpPort,
+    secure: smtpSecure,
     auth: {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS,
     },
+    tls: { servername: smtpHost },
   });
 
   const attachments = screenshotPaths
     .filter(p => p && fs.existsSync(p))
     .map(p => ({ filename: path.basename(p), path: p }));
 
-  const recipients = (process.env.REPORT_TO || '')
-    .split(',').map(e => e.trim()).filter(Boolean);
+  // Группа-специфичные адресаты. Если для группы не заданы —
+  // используем общий REPORT_TO как фолбэк.
+  const groupEnv = groupLabel === 'Европласт' ? process.env.REPORT_TO_EVROPLAST
+                 : groupLabel === 'Онлайн'    ? process.env.REPORT_TO_ONLINE
+                 : '';
+  const rawRecipients = groupEnv || process.env.REPORT_TO || '';
+  const recipients = rawRecipients.split(',').map(e => e.trim()).filter(Boolean);
 
-  await transporter.sendMail({
-    from: process.env.REPORT_FROM,
-    to: recipients.join(', '),
+  if (recipients.length === 0) {
+    throw new Error(`Не задан адрес получателя для группы "${groupLabel || 'default'}"`);
+  }
+
+  const fromAddr = process.env.SMTP_USER;
+  const fromDomain = (fromAddr.split('@')[1] || senderDomain()).trim();
+
+  // Строим письмо для конкретного одного получателя.
+  const buildMail = (to) => ({
+    from: `"AutoCamera Monitor" <${fromAddr}>`,
+    // envelope.from — то, что уходит в SMTP MAIL FROM. Должно совпадать с From
+    // и быть в том же домене, иначе Яндекс режет как SPAM/Spoof.
+    envelope: { from: fromAddr, to: [to] },
+    replyTo: fromAddr,
+    to,
     subject,
+    text: htmlToPlainText(html),
     html,
     attachments,
+    // Message-ID в том же домене, что и From — требование Яндекса.
+    messageId: `<autocamera-${randomUUID()}@${fromDomain}>`,
+    date: new Date(),
+    headers: {
+      'X-Mailer': 'AutoCamera Monitor/1.0',
+      'Auto-Submitted': 'auto-generated',
+      'Precedence': 'bulk',
+    },
   });
+
+  const sendOneWithRetry = async (to) => {
+    const maxAttempts = 2;
+    let lastErr;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await transporter.sendMail(buildMail(to));
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 60_000));
+      }
+    }
+    throw lastErr;
+  };
+
+  // КРИТИЧНО: отправляем каждому получателю ОТДЕЛЬНОЕ письмо.
+  // Яндекс часто режет массовые рассылки (несколько To) как SPAM 554 5.7.1,
+  // даже если все адреса валидные. Проверено 2026-04-23 — одиночные уходят.
+  const failures = [];
+  for (const to of recipients) {
+    try {
+      await sendOneWithRetry(to);
+    } catch (err) {
+      failures.push({ to, error: err.message });
+    }
+  }
+  if (failures.length > 0) {
+    const summary = failures.map(f => `${f.to}: ${f.error}`).join('; ');
+    throw new Error(summary);
+  }
+}
+
+/**
+ * Собирает список сломанных камер по всем системам (для helpdesk-письма).
+ * Исключает камеры из helpdeskIgnore и неиспользуемые каналы.
+ *
+ * @param {Array} systemResults — результаты проверки всех систем
+ * @returns {Array} [{ system, camera, status, notes }]
+ */
+export function collectBrokenCameras(systemResults) {
+  const broken = [];
+
+  for (const sys of systemResults) {
+    const ignoreList = sys.helpdeskIgnore || [];
+
+    const group = sys.group || 'Прочее';
+
+    // Ошибка всей системы — добавляем как одну запись
+    if (sys.error) {
+      broken.push({
+        group,
+        system: sys.name,
+        camera: '(вся система)',
+        status: 'ошибка проверки',
+        notes: sys.error,
+      });
+      continue;
+    }
+
+    for (const cam of sys.cameras) {
+      // Пропускаем неиспользуемые каналы
+      const unusedList = sys.unusedChannels || [];
+      const ch = cam.id != null ? cam.id : (cam.index ?? 0) + 1;
+      if (unusedList.includes(ch)) continue;
+
+      // Пропускаем камеры из helpdeskIgnore (по имени)
+      const camLabel = cam.name || `${ch}`;
+      if (ignoreList.some(pattern => camLabel.includes(pattern))) continue;
+
+      // Собираем сломанные: offline или нет записи
+      if (cam.online === false) {
+        broken.push({
+          group,
+          system: sys.name,
+          camera: camLabel,
+          status: 'OFFLINE',
+          notes: cam.notes || '',
+        });
+      } else if (cam.recording === false && cam.online === true) {
+        broken.push({
+          group,
+          system: sys.name,
+          camera: camLabel,
+          status: 'нет записи',
+          notes: cam.notes || '',
+        });
+      }
+    }
+  }
+
+  return broken;
+}
+
+/**
+ * Генерирует HTML-письмо для helpdesk с информацией о сломанных камерах.
+ *
+ * @param {Array} brokenCams — результат collectBrokenCameras()
+ * @param {object} runMeta — { startTime, durationMs }
+ * @returns {string} HTML-строка
+ */
+export function buildHelpdeskHtml(brokenCams, runMeta, groupLabel = '') {
+  const startDate = new Date(runMeta.startTime);
+  const dd = String(startDate.getDate()).padStart(2, '0');
+  const mm = String(startDate.getMonth() + 1).padStart(2, '0');
+  const yyyy = startDate.getFullYear();
+  const dateStr = `${dd}.${mm}.${yyyy}`;
+  const timeStr = startDate.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+
+  const rows = brokenCams.map(c => {
+    const statusColor = c.status === 'OFFLINE' ? '#e53e3e' : '#dd6b20';
+    return `<tr style="border-bottom:1px solid #e2e8f0;">
+      <td style="padding:6px 10px;font-size:13px;font-weight:600;color:#2c5282;">${c.system}</td>
+      <td style="padding:6px 10px;font-size:13px;">${c.camera}</td>
+      <td style="padding:6px 10px;font-size:13px;font-weight:700;color:${statusColor};">${c.status}</td>
+      <td style="padding:6px 10px;font-size:12px;color:#4a5568;">${c.notes}</td>
+    </tr>`;
+  }).join('');
+
+  const groupHeader = groupLabel
+    ? `<div style="background:#1a365d;color:#ffffff;padding:6px 14px;font-size:13px;font-weight:700;letter-spacing:0.6px;border-radius:3px;margin:10px 0;">Проект: ${groupLabel.toUpperCase()}</div>`
+    : '';
+
+  return `<!DOCTYPE html>
+<html lang="ru">
+<head><meta charset="UTF-8"><title>Проблемы видеонаблюдения ${dateStr}</title></head>
+<body style="font-family:Arial,sans-serif;background:#ffffff;color:#1a202c;margin:0;padding:20px;max-width:700px;">
+
+<div style="background:#c53030;color:#ffffff;padding:12px 18px;border-radius:4px;font-size:16px;font-weight:700;">
+  &#9888; Обнаружены проблемы с камерами видеонаблюдения
+</div>
+
+${groupHeader}
+
+<p style="font-size:14px;color:#4a5568;margin:12px 0;">
+  Автоматическая проверка <strong>${dateStr} ${timeStr}</strong> выявила <strong>${brokenCams.length}</strong> проблем(ы)${groupLabel ? ` по проекту «${groupLabel}»` : ''}:
+</p>
+
+<table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;margin:12px 0;">
+  <tr style="background:#2c5282;color:#ffffff;">
+    <th style="padding:8px 10px;font-size:12px;text-align:left;">Система</th>
+    <th style="padding:8px 10px;font-size:12px;text-align:left;">Камера</th>
+    <th style="padding:8px 10px;font-size:12px;text-align:left;">Статус</th>
+    <th style="padding:8px 10px;font-size:12px;text-align:left;">Подробности</th>
+  </tr>
+  ${rows}
+</table>
+
+<p style="font-size:12px;color:#718096;margin-top:18px;border-top:1px solid #e2e8f0;padding-top:12px;">
+  Письмо сформировано автоматически системой AutoCamera Monitor.<br>
+  Для подробностей смотрите полный отчёт по видеонаблюдению.
+</p>
+
+</body>
+</html>`;
+}
+
+/**
+ * Отправляет helpdesk-письмо о сломанных камерах.
+ *
+ * @param {object} params
+ * @param {Array}  params.brokenCams — результат collectBrokenCameras()
+ * @param {object} params.runMeta    — { startTime, durationMs }
+ */
+export async function sendHelpdeskReport({ brokenCams, runMeta }) {
+  const helpdeskTo = (process.env.HELPDESK_TO || '')
+    .split(',').map(e => e.trim()).filter(Boolean);
+  if (helpdeskTo.length === 0) return;
+  if (brokenCams.length === 0) return;
+
+  // Группируем сломанные камеры по проектам (Европласт / Онлайн / ...)
+  const byGroup = new Map();
+  for (const c of brokenCams) {
+    const g = c.group || 'Прочее';
+    if (!byGroup.has(g)) byGroup.set(g, []);
+    byGroup.get(g).push(c);
+  }
+
+  const d = new Date(runMeta.startTime);
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+
+  const smtpHost = process.env.SMTP_HOST;
+  const smtpPort = parseInt(process.env.SMTP_PORT || '587');
+  const smtpSecure = process.env.SMTP_SECURE === 'true';
+
+  const lookup = (host) => new Promise((resolve, reject) => {
+    dns.lookup(host, { family: 4 }, (err, addr) => err ? reject(err) : resolve(addr));
+  });
+  const smtpIp = await lookup(smtpHost);
+
+  const transporter = nodemailer.createTransport({
+    host: smtpIp,
+    port: smtpPort,
+    secure: smtpSecure,
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    tls: { servername: smtpHost },
+  });
+
+  const fromAddr = process.env.SMTP_USER;
+  const fromDomain = (fromAddr.split('@')[1] || senderDomain()).trim();
+
+  const buildMail = (to, groupName, cams) => {
+    const html = buildHelpdeskHtml(cams, runMeta, groupName);
+    const subject = `[HELPDESK] ${groupName} — проблемы камер ${dd}.${mm}.${yyyy} (${cams.length} шт.)`;
+    return {
+      from: `"AutoCamera Helpdesk" <${fromAddr}>`,
+      envelope: { from: fromAddr, to: [to] },
+      replyTo: fromAddr,
+      to,
+      subject,
+      text: htmlToPlainText(html),
+      html,
+      messageId: `<autocamera-hd-${randomUUID()}@${fromDomain}>`,
+      date: new Date(),
+      headers: {
+        'X-Mailer': 'AutoCamera Monitor/1.0',
+        'Auto-Submitted': 'auto-generated',
+        'Precedence': 'bulk',
+      },
+    };
+  };
+
+  const sendOneWithRetry = async (to, groupName, cams) => {
+    const maxAttempts = 2;
+    let lastErr;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await transporter.sendMail(buildMail(to, groupName, cams));
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 60_000));
+      }
+    }
+    throw lastErr;
+  };
+
+  // Для каждой группы — каждому получателю ОТДЕЛЬНОЕ письмо (иначе Яндекс SPAM).
+  const failures = [];
+  for (const [groupName, cams] of byGroup) {
+    for (const to of helpdeskTo) {
+      try {
+        await sendOneWithRetry(to, groupName, cams);
+      } catch (err) {
+        failures.push({ to, groupName, error: err.message });
+      }
+    }
+  }
+  if (failures.length > 0) {
+    const summary = failures.map(f => `${f.groupName} → ${f.to}: ${f.error}`).join('; ');
+    throw new Error(summary);
+  }
 }
 
 /**

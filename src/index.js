@@ -13,13 +13,14 @@ import fs from 'fs';
 import path from 'path';
 import * as log from './logger.js';
 
-import {
-  captureSystemScreenshot,
-  ensureScreenshotsDir,
-  cleanOldScreenshots,
-} from './browser.js';
-import { analyzeScreenshot } from './analyzer.js';
-import { buildReport, sendReport, cleanOldReports } from './reporter.js';
+import { buildReport, sendReport, cleanOldReports, REPORT_GROUPS, collectBrokenCameras, sendHelpdeskReport } from './reporter.js';
+import { fetchHikvisionStatus } from './isapi.js';
+import { checkCamerasByRtsp } from './rtsp-check.js';
+import { checkTrassirSystem } from './trassir-check.js';
+import { checkBewardSystem } from './beward-check.js';
+import { checkRecordingsSystem } from './recordings-check.js';
+import { checkHikvisionMultiSystem } from './hikvision-multi.js';
+import { checkRostelecomSystem } from './rostelecom-check.js';
 
 // ─── Load .env ────────────────────────────────────────────────────────────────
 const dotenvPath = path.resolve('.env');
@@ -47,7 +48,6 @@ const systemsConfig = JSON.parse(
 );
 
 // ─── Ensure directories ───────────────────────────────────────────────────────
-ensureScreenshotsDir();
 fs.mkdirSync(path.join(ROOT, 'reports'), { recursive: true });
 fs.mkdirSync(path.join(ROOT, 'logs'),    { recursive: true });
 
@@ -78,13 +78,7 @@ log.info('startup', 'Конфигурация загружена', {
   systems: systemsConfig.length,
   mode: isDryRun ? 'dry-run' : 'full',
   only: onlyId || 'all',
-  model: process.env.POLZA_MODEL || 'google/gemini-3.1-flash-lite-preview',
 });
-
-// Проверяем наличие API ключа
-if (!process.env.POLZA_API_KEY) {
-  log.error('startup', 'POLZA_API_KEY не задан в .env — AI анализ работать не будет');
-}
 
 const systems = systemsConfig.filter(sys => {
   if (sys.enabled === false) return false;
@@ -114,7 +108,7 @@ for (let i = 0; i < systems.length; i++) {
     pass:            process.env[sys.passEnv]  || '',
   };
 
-  if (!creds.url) {
+  if (!creds.url && !['ipanda-rtsp', 'trassir-sdk', 'beward-smb', 'smb-recordings', 'hikvision-multi', 'rt-portal'].includes(sys.type)) {
     log.warn(sys.id, 'Пропуск — URL не настроен в .env', { envVar: sys.urlEnv });
     systemResults.push({
       ...sys, cameras: [], screenshotPath: null,
@@ -132,92 +126,258 @@ for (let i = 0; i < systems.length; i++) {
   const result = {
     id: sys.id,
     name: sys.name,
+    group: sys.group || '',
+    unusedChannels: Array.isArray(sys.unusedChannels) ? sys.unusedChannels : [],
+    helpdeskIgnore: Array.isArray(sys.helpdeskIgnore) ? sys.helpdeskIgnore : [],
+    displayMode: sys.displayMode || 'table',
+    gridColumns: sys.gridColumns || 5,
     cameras: [],
     screenshotPath: null,
     error: null,
     aiSummary: '',
   };
 
-  // ── Шаг 1: Скриншот ──
-  const { screenshotPath, error: shotError } = await captureSystemScreenshot(sys, creds);
+  // ── Hikvision/HiWatch: используем ISAPI ──
+  if (sys.type === 'hiwatch' || sys.type === 'hikvision') {
+    const baseUrl = creds.url.replace(/\/doc\/page\/login\.asp.*/, '').replace(/\/$/, '');
+    const { cameras: isapiCams, error: isapiError } = await fetchHikvisionStatus(
+      baseUrl, creds.user, creds.pass, { maxChannelId: sys.maxChannelId }
+    );
 
-  if (shotError) {
-    result.error = shotError;
-    result.cameras = Array.from({ length: sys.cameraCount || 1 }, (_, i) => ({
-      index: i, online: 'unknown', recording: 'unknown', audio: 'unknown',
-      notes: `Скриншот не получен: ${shotError}`,
-    }));
+    if (isapiError) {
+      result.error = isapiError;
+      result.cameras = Array.from({ length: sys.cameraCount || 1 }, (_, i) => ({
+        index: i, online: 'unknown', recording: 'unknown', audio: 'unknown',
+        notes: `ISAPI ошибка: ${isapiError}`,
+      }));
+    } else {
+      result.cameras = isapiCams;
+      const online = isapiCams.filter(c => c.online === true).length;
+      const offline = isapiCams.filter(c => c.online === false).length;
+      result.aiSummary = `ISAPI: ${online} online, ${offline} offline из ${isapiCams.length}`;
+    }
+
     systemResults.push(result);
     continue;
   }
 
-  result.screenshotPath = screenshotPath;
+  // ── iPanda (RTSP): проверяем камеры через RTSP DESCRIBE ──
+  if (sys.type === 'ipanda-rtsp' && sys.cameras?.length) {
+    const { cameras: rtspCams, error: rtspError } = await checkCamerasByRtsp(
+      sys.cameras, sys.rtspUser || 'admin', sys.rtspPass || '', sys.id,
+      { nvrIp: sys.nvrIp, nvrRtspUser: sys.nvrRtspUser, nvrRtspPass: sys.nvrRtspPass,
+        probeVideo: sys.viaNvr || sys.cameras.some(c => c.viaNvr) }
+    );
 
-  // ── Шаг 2: AI анализ ──
-  const { cameras, summary, error: aiError } = await analyzeScreenshot(
-    screenshotPath, sys.type, sys.id
-  );
+    if (rtspError) {
+      result.error = rtspError;
+    } else {
+      result.cameras = rtspCams;
+      const online = rtspCams.filter(c => c.online === true).length;
+      const offline = rtspCams.filter(c => c.online === false).length;
+      result.aiSummary = `RTSP: ${online} online, ${offline} offline из ${rtspCams.length}`;
+    }
 
-  result.aiSummary = summary;
+    systemResults.push(result);
+    continue;
+  }
 
-  // Merge AI results with known camera list
-  const knownCameras = sys.cameras || Array.from(
-    { length: sys.cameraCount || cameras.length }, (_, i) => ({ index: i })
-  );
+  // ── TRASSIR (SDK HTTP API) ──
+  if (sys.type === 'trassir-sdk') {
+    const { cameras: trCams, error: trErr } = await checkTrassirSystem({
+      id:           sys.id,
+      host:         sys.host,
+      port:         sys.port || 8080,
+      user:         process.env[sys.userEnv] || sys.user,
+      pass:         process.env[sys.passEnv] || sys.pass,
+      knownOffline: sys.knownOffline || [],
+      cameraGuids:  sys.cameraGuids  || {},
+    });
+    if (trErr) {
+      result.error = trErr;
+    } else {
+      result.cameras = trCams;
+      const online  = trCams.filter(c => c.online === true).length;
+      const offline = trCams.filter(c => c.online === false).length;
+      result.aiSummary = `TRASSIR SDK: ${online} online, ${offline} offline из ${trCams.length}`;
+    }
+    systemResults.push(result);
+    continue;
+  }
 
-  result.cameras = knownCameras.map(known => {
-    const ai = cameras.find(c => c.index === known.index) || {};
-    return {
-      index: known.index,
-      name:  known.name || `Камера ${known.index + 1}`,
-      online:    ai.online    ?? 'unknown',
-      recording: ai.recording ?? 'unknown',
-      audio:     ai.audio     ?? 'unknown',
-      notes:     ai.notes     || (aiError ? 'AI анализ не выполнен' : ''),
-    };
-  });
+  // ── SMB-папки с записями (Европласт стройка и т.п.) ──
+  if (sys.type === 'smb-recordings') {
+    const { cameras: recCams, error: recErr } = await checkRecordingsSystem({
+      id:           sys.id,
+      host:         sys.host,
+      shareName:    sys.shareName,
+      basePath:     sys.basePath,
+      smbUser:      process.env[sys.smbUserEnv] || sys.smbUser,
+      smbPass:      process.env[sys.smbPassEnv] || sys.smbPass,
+      freshnessMin: sys.freshnessMin || 60,
+      channels:     sys.channels || [],
+    });
+    if (recErr) {
+      result.error = recErr;
+    } else {
+      result.cameras = recCams;
+      const online  = recCams.filter(c => c.online === true).length;
+      const offline = recCams.filter(c => c.online === false).length;
+      result.aiSummary = `Recordings: ${online} ok, ${offline} stale из ${recCams.length}`;
+    }
+    systemResults.push(result);
+    continue;
+  }
 
+  // ── Несколько одиночных Hikvision-камер (iVMS) ──
+  if (sys.type === 'hikvision-multi') {
+    const { cameras: hkCams, error: hkErr } = await checkHikvisionMultiSystem({
+      id: sys.id,
+      cameras: sys.cameras || [],
+    });
+    if (hkErr) {
+      result.error = hkErr;
+    } else {
+      result.cameras = hkCams;
+      const online  = hkCams.filter(c => c.online === true).length;
+      const offline = hkCams.filter(c => c.online === false).length;
+      result.aiSummary = `iVMS: ${online} online, ${offline} offline из ${hkCams.length}`;
+    }
+    systemResults.push(result);
+    continue;
+  }
+
+  // ── BEWARD Record Center (SMB-шара записей) ──
+  if (sys.type === 'beward-smb') {
+    const { cameras: bwCams, error: bwErr } = await checkBewardSystem({
+      id:           sys.id,
+      host:         sys.host,
+      shareName:    sys.shareName,
+      smbUser:      process.env[sys.smbUserEnv] || sys.smbUser,
+      smbPass:      process.env[sys.smbPassEnv] || sys.smbPass,
+      freshnessMin: sys.freshnessMin || 60,
+      cameras:      sys.cameras || [],
+    });
+    if (bwErr) {
+      result.error = bwErr;
+    } else {
+      result.cameras = bwCams;
+      const online  = bwCams.filter(c => c.online === true).length;
+      const offline = bwCams.filter(c => c.online === false).length;
+      result.aiSummary = `BEWARD: ${online} online, ${offline} offline из ${bwCams.length}`;
+    }
+    systemResults.push(result);
+    continue;
+  }
+
+  // ── Ростелеком (портал RT + откат на ping) ──
+  if (sys.type === 'rt-portal') {
+    const portalUrl = process.env[sys.portalUrlEnv] || '';
+    const rtUser    = process.env[sys.userEnv] || '';
+    const rtPass    = process.env[sys.passEnv] || '';
+    const { cameras: rtCams, error: rtErr, method } = await checkRostelecomSystem({
+      id: sys.id, portalUrl, user: rtUser, pass: rtPass,
+      cameras: sys.cameras || [],
+      excludeApiNames: sys.excludeApiNames || [],
+      portalRetries: sys.portalRetries || 3,
+    });
+    if (rtErr) result.error = rtErr;
+    result.cameras = rtCams;
+    const online  = rtCams.filter(c => c.online === true).length;
+    const offline = rtCams.filter(c => c.online === false).length;
+    const src = method === 'portal' ? 'Портал РТ' : 'Ping';
+    result.aiSummary = `${src}: ${online} online, ${offline} offline из ${rtCams.length}`;
+    systemResults.push(result);
+    continue;
+  }
+
+  // ── Неизвестный тип системы ──
+  log.warn(sys.id, `Неизвестный тип системы: ${sys.type}. Пропускаю.`);
+  result.error = `Неизвестный тип проверки: ${sys.type}`;
   systemResults.push(result);
 }
 
-// ─── Build report ─────────────────────────────────────────────────────────────
-log.section('Формирование отчёта');
+// ─── Build & send report per group ────────────────────────────────────────────
+log.section('Формирование отчётов');
 const durationMs = Date.now() - startTime;
-const reportPath = buildReport({ systemResults, runMeta: { startTime, durationMs } });
-log.info('report', 'HTML-отчёт сохранён', { path: reportPath });
 
-// ─── Count issues ─────────────────────────────────────────────────────────────
-const issueCount = systemResults.reduce((sum, sys) => {
-  if (sys.error) return sum + 1;
-  return sum + sys.cameras.filter(c => c.online === false || c.recording === false).length;
-}, 0);
+// Общий отчёт для браузера (все группы вместе)
+const fullReportPath = buildReport({ systemResults, runMeta: { startTime, durationMs } });
+log.info('report', 'Полный HTML-отчёт сохранён', { path: fullReportPath });
 
-if (issueCount > 0) {
-  log.warn('report', `Обнаружено проблем: ${issueCount}`);
+// Отдельные отчёты по группам (для email)
+let totalIssues = 0;
+const groupReports = [];
+for (const group of REPORT_GROUPS) {
+  const groupSystems = systemResults.filter(s => (s.group || '') === group);
+  if (groupSystems.length === 0) continue;
+
+  const groupIssues = groupSystems.reduce((sum, sys) => {
+    if (sys.error) return sum + 1;
+    return sum + sys.cameras.filter(c => c.online === false || c.recording === false).length;
+  }, 0);
+  totalIssues += groupIssues;
+
+  const reportPath = buildReport({
+    systemResults, runMeta: { startTime, durationMs }, group,
+  });
+  log.info('report', `HTML-отчёт сохранён [${group}]`, { path: reportPath, issues: groupIssues });
+  groupReports.push({ group, reportPath, issues: groupIssues });
+}
+
+if (totalIssues > 0) {
+  log.warn('report', `Обнаружено проблем: ${totalIssues}`);
 } else {
   log.info('report', 'Проблем не обнаружено');
 }
 
-// ─── Send email ───────────────────────────────────────────────────────────────
-const screenshotPaths = systemResults.map(s => s.screenshotPath).filter(Boolean);
-
+// ─── Send email per group ─────────────────────────────────────────────────────
+let emailFailures = 0;
 if (!isDryRun) {
-  log.stepStart('email', 'Отправка email', { to: process.env.REPORT_TO });
-  try {
-    await sendReport({ reportPath, issueCount, runTime: startTime, screenshotPaths });
-    log.stepEnd('email', 'ok', 'Email отправлен');
-  } catch (err) {
-    log.stepEnd('email', 'fail', 'Email не отправлен', { error: err.message });
-    process.exit(1);
+  for (const { group, reportPath, issues } of groupReports) {
+    const toEnv = group === 'Европласт' ? process.env.REPORT_TO_EVROPLAST
+                : group === 'Онлайн'    ? process.env.REPORT_TO_ONLINE
+                : '';
+    const to = toEnv || process.env.REPORT_TO || '(не задан)';
+    log.stepStart('email', `Отправка email [${group}]`, { to });
+    try {
+      await sendReport({
+        reportPath, issueCount: issues, runTime: startTime,
+        screenshotPaths: [], groupLabel: group,
+      });
+      log.stepEnd('email', 'ok', `Email отправлен [${group}]`);
+    } catch (err) {
+      // Не валим процесс — отчёт уже сохранён локально, остальные письма
+      // должны продолжать отправляться.
+      log.stepEnd('email', 'fail', `Email не отправлен [${group}] (отчёт сохранён локально)`, {
+        error: err.message, reportPath,
+      });
+      emailFailures++;
+    }
+  }
+  // Helpdesk-письмо о сломанных камерах
+  const brokenCams = collectBrokenCameras(systemResults);
+  if (brokenCams.length > 0) {
+    log.stepStart('helpdesk', `Отправка helpdesk-письма`, { to: process.env.HELPDESK_TO, broken: brokenCams.length });
+    try {
+      await sendHelpdeskReport({ brokenCams, runMeta: { startTime, durationMs } });
+      log.stepEnd('helpdesk', 'ok', `Helpdesk-письмо отправлено (${brokenCams.length} проблем)`);
+    } catch (err) {
+      log.stepEnd('helpdesk', 'fail', 'Helpdesk-письмо не отправлено', { error: err.message });
+      emailFailures++;
+    }
+  } else {
+    log.info('helpdesk', 'Проблем нет — helpdesk-письмо не отправляется');
   }
 } else {
-  log.info('email', 'DRY-RUN: email не отправлен', { issues: issueCount });
+  log.info('email', 'DRY-RUN: email не отправлен', { groups: groupReports.length, issues: totalIssues });
 }
 
+const issueCount = totalIssues;
+
 // ─── Cleanup ──────────────────────────────────────────────────────────────────
-cleanOldScreenshots(3);
-cleanOldReports(30);
-log.cleanOldLogs(90);
+cleanOldReports(14);
+log.cleanOldLogs(14);
 
 // ─── Итог ─────────────────────────────────────────────────────────────────────
 const totalSec = Math.round((Date.now() - startTime) / 1000);
@@ -226,7 +386,10 @@ log.info('done', 'Запуск завершён', {
   duration: `${totalSec}s`,
   systems: systemResults.length,
   issues: issueCount,
-  report: path.basename(reportPath),
+  emailFailures,
+  reports: groupReports.map(g => path.basename(g.reportPath)).join(', '),
 });
 
-process.exit(0);
+// Если были неудачные отправки — exit 1, чтобы планировщик отметил прогон
+// как проблемный. Но отчёты уже сохранены локально в reports/.
+process.exit(emailFailures > 0 ? 1 : 0);
