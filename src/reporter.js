@@ -245,7 +245,13 @@ export function buildReport({ systemResults, runMeta, group, outputPath, liveMod
                  : noRec                ? '#dd6b20'
                  : cam.online === true  ? '#2f855a'
                  :                        '#a0aec0';
-        const label = gridLabel(cam.name) + (noRec ? ' <span style="font-size:8px;vertical-align:top;">⚠</span>' : '');
+        // Если есть snapshotUrl от Я.Диска — иконка-ссылка на снимок (v2)
+        const snapLink = cam.snapshotUrl
+          ? ` <a href="${cam.snapshotUrl}" style="color:#ffffff;text-decoration:none;" title="Открыть снимок на Я.Диске">📷</a>`
+          : '';
+        const label = gridLabel(cam.name)
+                    + (noRec ? ' <span style="font-size:8px;vertical-align:top;">⚠</span>' : '')
+                    + snapLink;
         return `<td width="${cellWidth}" align="center" bgcolor="${bg}" style="padding:3px 2px;color:#ffffff;font-weight:700;font-size:10px;border:1px solid #ffffff;line-height:1.1;">${label}</td>`;
       });
       while (tds.length < cols) tds.push(`<td width="${cellWidth}" style="border:1px solid #ffffff;"></td>`);

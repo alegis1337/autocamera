@@ -59,6 +59,52 @@ export async function isapiRequest(baseUrl, path, user, pass, { method = 'GET', 
   return await resp2.text();
 }
 
+/**
+ * Аналог isapiRequest, но возвращает Buffer (для бинарных endpoint'ов
+ * вроде /Streaming/channels/<N>/picture). Использует тот же digestCache.
+ *
+ * @returns {Promise<Buffer>}
+ */
+export async function isapiGetBinary(baseUrl, path, user, pass) {
+  const url = `${baseUrl}${path}`;
+
+  // Сначала пробуем кэшированную auth
+  const cached = digestCache[baseUrl];
+  if (cached) {
+    cached.nc++;
+    const authHeader = buildDigestHeader(cached, user, 'GET', path);
+    const resp = await fetch(url, { headers: { 'Authorization': authHeader } });
+    if (resp.ok) return Buffer.from(await resp.arrayBuffer());
+    if (resp.status !== 401) throw new Error(`ISAPI binary ${path} returned ${resp.status}`);
+    delete digestCache[baseUrl];
+  }
+
+  const resp1 = await fetch(url, {});
+  if (resp1.status !== 401) {
+    if (resp1.ok) return Buffer.from(await resp1.arrayBuffer());
+    throw new Error(`ISAPI binary unexpected status ${resp1.status}`);
+  }
+
+  const wwwAuth = resp1.headers.get('www-authenticate');
+  if (!wwwAuth || !wwwAuth.toLowerCase().startsWith('digest')) {
+    throw new Error('Server does not support Digest auth');
+  }
+  const params = {
+    realm:  extractParam(wwwAuth, 'realm'),
+    nonce:  extractParam(wwwAuth, 'nonce'),
+    qop:    extractParam(wwwAuth, 'qop'),
+    opaque: extractParam(wwwAuth, 'opaque'),
+    nc: 1,
+    ha1: md5(`${user}:${extractParam(wwwAuth, 'realm')}:${pass}`),
+  };
+  digestCache[baseUrl] = params;
+
+  const authHeader = buildDigestHeader(params, user, 'GET', path);
+  const resp2 = await fetch(url, { headers: { 'Authorization': authHeader } });
+  if (!resp2.ok) throw new Error(`ISAPI binary ${path} returned ${resp2.status}`);
+  return Buffer.from(await resp2.arrayBuffer());
+}
+
 function buildDigestHeader(params, user, method, path) {
   const nc = params.nc.toString(16).padStart(8, '0');
   const cnonce = Math.random().toString(36).substring(2, 10);

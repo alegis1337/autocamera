@@ -9,12 +9,15 @@
  *   node src/index.js --debug                     — подробные логи
  *   node src/index.js --reset-state               — обнулить helpdesk-state.json
  *   node src/index.js --no-diagnose               — отключить активную диагностику
+ *   node src/index.js --no-snapshots              — не снимать кадры и не лезть на Я.Диск
  *
  * v2 features:
  *   • helpdesk-state в state/helpdesk-state.json — заявки уходят только
  *     при смене статуса (active↔broken). См. src/state.js.
  *   • Активная диагностика — после чекеров пингуем регистратор/камеру
  *     и формулируем причину + рекомендацию. См. src/diagnose.js.
+ *   • Snapshots → Я.Диск — кадры online-камер заливаются в облако с
+ *     публичными ссылками. См. src/snapshots.js + src/yandex-disk.js.
  */
 
 import fs from 'fs';
@@ -31,6 +34,8 @@ import { checkHikvisionMultiSystem } from './hikvision-multi.js';
 import { checkRostelecomSystem } from './rostelecom-check.js';
 import { loadState, saveState, resetState, diffAndUpdate } from './state.js';
 import { diagnoseAll } from './diagnose.js';
+import { captureAll, cleanupRun } from './snapshots.js';
+import { uploadAndPublish, cleanupOlderThan } from './yandex-disk.js';
 
 // ─── Load .env ────────────────────────────────────────────────────────────────
 const dotenvPath = path.resolve('.env');
@@ -46,6 +51,7 @@ const isTestEmail  = args.includes('--test-email');
 const isDebug      = args.includes('--debug');
 const isResetState = args.includes('--reset-state');
 const isNoDiagnose = args.includes('--no-diagnose');
+const isNoSnapshots = args.includes('--no-snapshots');
 const onlyId       = (() => {
   const idx = args.indexOf('--only');
   return idx >= 0 ? args[idx + 1] : null;
@@ -361,6 +367,73 @@ if (!isNoDiagnose) {
   }
 } else {
   log.info('diagnose', 'Активная диагностика отключена (--no-diagnose)');
+}
+
+// ─── Snapshots → Yandex.Disk (v2) ─────────────────────────────────────────────
+// Захватываем кадры с онлайн-камер, грузим на Я.Диск, в каждом cam.snapshotUrl
+// сохраняем публичную ссылку. Без YANDEX_DISK_TOKEN — фича пропускается.
+const yToken    = process.env.YANDEX_DISK_TOKEN || '';
+const yRoot     = process.env.YANDEX_DISK_ROOT  || '/AutoCamera';
+const yRetention = parseInt(process.env.SNAPSHOT_RETENTION_DAYS || '30', 10);
+
+if (!isNoSnapshots && yToken) {
+  // runId формата 2026-05-05-1100 — он же будет именем папок локально и на Я.Диске
+  const dt = new Date(startTime);
+  const ymd = dt.toISOString().slice(0, 10);                 // 2026-05-05
+  const hm  = String(dt.getHours()).padStart(2, '0')
+            + String(dt.getMinutes()).padStart(2, '0');      // 1100
+  const runId      = `${ymd}-${hm}`;
+  const remoteBase = `${yRoot}/${ymd}/${hm}`;
+
+  log.stepStart('snapshots', 'Захват кадров с камер');
+  let captured = [];
+  try {
+    captured = await captureAll(systemResults, runId, { concurrency: 5 });
+  } catch (err) {
+    log.stepEnd('snapshots', 'fail', 'captureAll упал', { error: err.message });
+  }
+  const okCount  = captured.filter(c => c.localPath).length;
+  const errCount = captured.length - okCount;
+  log.stepEnd('snapshots', 'ok', `Кадры сняты: ${okCount} ok, ${errCount} с ошибкой`);
+
+  // Заливка на Я.Диск (последовательно — чтобы не упереться в 429)
+  log.stepStart('yandex-disk', 'Загрузка кадров на Я.Диск', { root: remoteBase });
+  let uploaded = 0, uploadErrors = 0;
+  for (const item of captured) {
+    if (!item.localPath) continue;
+    const remotePath = `${remoteBase}/${item.sysId}/${path.basename(item.localPath)}`;
+    const url = await uploadAndPublish(item.localPath, remotePath, {
+      onError: (err, stage) => log.warn('yandex-disk', `${stage} ${item.sysId}/${item.camName}: ${err.message}`),
+    });
+    if (url) {
+      uploaded++;
+      // Прокидываем URL в объект камеры для рендеринга в отчёте
+      const sys = systemResults.find(s => s.id === item.sysId);
+      const cam = sys?.cameras?.find(c => c.index === item.camIndex);
+      if (cam) cam.snapshotUrl = url;
+    } else {
+      uploadErrors++;
+    }
+  }
+  log.stepEnd('yandex-disk', uploadErrors === 0 ? 'ok' : 'warn',
+    `Загружено: ${uploaded} ok, ${uploadErrors} с ошибкой`);
+
+  // Удаляем локальные временные файлы
+  cleanupRun(runId);
+
+  // Retention-чистка старых папок на Я.Диске
+  if (yRetention > 0) {
+    try {
+      const { deleted, kept } = await cleanupOlderThan(yRoot, yRetention);
+      if (deleted > 0) log.info('yandex-disk', `Retention: удалено ${deleted} старых папок (>${yRetention}д), оставлено ${kept}`);
+    } catch (err) {
+      log.warn('yandex-disk', 'Retention-чистка не сработала', { error: err.message });
+    }
+  }
+} else if (isNoSnapshots) {
+  log.info('snapshots', 'Снимки отключены (--no-snapshots)');
+} else {
+  log.info('snapshots', 'YANDEX_DISK_TOKEN не задан — снимки пропускаем');
 }
 
 // ─── Build & send report per group ────────────────────────────────────────────
