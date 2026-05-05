@@ -60,9 +60,13 @@ export const REPORT_GROUPS = ['Европласт', 'Онлайн'];
  * @param {object} params
  * @param {Array}  params.systemResults  - per-system results
  * @param {object} params.runMeta        - { startTime, durationMs }
+ * @param {string} [params.group]        - "Европласт"/"Онлайн" — для email
+ * @param {string} [params.outputPath]   - переопределить путь сохранения
+ *                                          (используется live-монитором)
+ * @param {boolean}[params.liveMode]     - добавить meta-refresh + плашку
  * @returns {string} absolute path to saved HTML file
  */
-export function buildReport({ systemResults, runMeta, group }) {
+export function buildReport({ systemResults, runMeta, group, outputPath, liveMode = false }) {
   fs.mkdirSync(REPORTS_DIR, { recursive: true });
 
   // Если задана конкретная группа — фильтруем по ней.
@@ -78,7 +82,7 @@ export function buildReport({ systemResults, runMeta, group }) {
   const ts = new Date(runMeta.startTime)
     .toISOString().replace(/[:.]/g, '-').replace('T', '-').slice(0, 19);
   const groupSlug = group ? `-${group.toLowerCase().replace(/[^a-zа-я0-9]+/gi, '_')}` : '';
-  const reportPath = path.join(REPORTS_DIR, `report-${ts}${groupSlug}.html`);
+  const reportPath = outputPath || path.join(REPORTS_DIR, `report-${ts}${groupSlug}.html`);
 
   const startDate = new Date(runMeta.startTime);
   const dd = String(startDate.getDate()).padStart(2, '0');
@@ -337,11 +341,27 @@ export function buildReport({ systemResults, runMeta, group }) {
     </div>`;
   }).join('\n');
 
+  // Live-режим: meta-refresh каждые 30с, плашка над содержимым,
+  // другой title (видно в табе браузера).
+  const liveTimeStr = startDate.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  const liveMetaTag = liveMode
+    ? '<meta http-equiv="refresh" content="30">'
+    : '';
+  const liveBannerHtml = liveMode
+    ? `<div style="background:#1a365d;color:#ffffff;padding:8px 14px;border-radius:4px;font-size:13px;margin-bottom:12px;font-family:Arial,sans-serif;">
+         &#10227; <strong>Live-монитор</strong> — обновлено в ${liveTimeStr}, страница перезагрузится автоматически каждые 30 сек
+       </div>`
+    : '';
+  const titleStr = liveMode
+    ? `AutoCamera Live (${liveTimeStr})`
+    : `Отчёт по видеонаблюдению ${dateStr}`;
+
   const html = `<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<title>Отчёт по видеонаблюдению ${dateStr}</title>
+${liveMetaTag}
+<title>${titleStr}</title>
 <style>
   body { font-family: Georgia, "Times New Roman", serif; background:#ffffff; color:#1a202c; margin:0; padding:18px; max-width:720px; line-height:1.5; }
   .greeting { font-size:1rem; margin-bottom:6px; }
@@ -376,8 +396,9 @@ export function buildReport({ systemResults, runMeta, group }) {
 </head>
 <body>
 
-<div class="greeting">Добрый день!</div>
-<div class="lead">Отчёт по видеонаблюдению на ${dateStr}</div>
+${liveBannerHtml}
+${liveMode ? '' : '<div class="greeting">Добрый день!</div>'}
+<div class="lead">${liveMode ? 'AutoCamera Live — статус видеонаблюдения' : `Отчёт по видеонаблюдению на ${dateStr}`}</div>
 ${isBrowserReport ? `<div style="font-size:0.8rem;color:#718096;margin-bottom:12px;">Проверка: ${new Date(runMeta.startTime).toLocaleTimeString('ru-RU')} | Длительность: ${Math.round(runMeta.durationMs / 1000)} сек | Систем: ${filtered.length}</div>` : ''}
 
 <div class="section-title">Не работают камеры</div>
@@ -904,6 +925,8 @@ export function cleanOldReports(days) {
   if (!fs.existsSync(REPORTS_DIR)) return;
   for (const file of fs.readdirSync(REPORTS_DIR)) {
     if (!file.endsWith('.html')) continue;
+    // Live-монитор перезаписывается каждый прогон — не удалять
+    if (file === 'live.html') continue;
     const fullPath = path.join(REPORTS_DIR, file);
     if (fs.statSync(fullPath).mtimeMs < cutoff) fs.unlinkSync(fullPath);
   }

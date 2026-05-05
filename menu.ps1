@@ -103,6 +103,7 @@ function Show-Menu {
     Write-Host "(portal)" -ForegroundColor DarkGray
     Write-Host "   --------------------------------" -ForegroundColor DarkGray
     Write-Host "   R  Otkryt posledniy otchet" -ForegroundColor Yellow
+    Write-Host "   V  Otkryt live-monitor" -ForegroundColor Yellow
     Write-Host "   L  Otkryt logi" -ForegroundColor Yellow
     Write-Host "   --------------------------------" -ForegroundColor DarkGray
     Write-Host "   S  Nastroit raspisanie" -ForegroundColor Magenta
@@ -419,6 +420,18 @@ function Open-LastReport {
     }
 }
 
+function Open-LiveMonitor {
+    $live = Join-Path $ProjectDir "reports\live.html"
+    if (Test-Path $live) {
+        Write-Host ""
+        Write-Host "  Otkryvayu live-monitor (auto-refresh 30 sek)..." -ForegroundColor Yellow
+        Start-Process $live
+    } else {
+        Write-Host ""
+        Write-Host "  Net live.html. Zapustite proverku snachala (1, T ili odnu iz sistem)." -ForegroundColor Red
+    }
+}
+
 function Run-Check {
     param($OnlyId, [switch]$DryRun)
     Write-Host ""
@@ -456,6 +469,8 @@ while ($true) {
         "10" { Run-Check "rostelecom" }
         "R"  { Open-LastReport; Write-Host ""; Read-Host "  Enter..." }
         "r"  { Open-LastReport; Write-Host ""; Read-Host "  Enter..." }
+        "V"  { Open-LiveMonitor; Write-Host ""; Read-Host "  Enter..." }
+        "v"  { Open-LiveMonitor; Write-Host ""; Read-Host "  Enter..." }
         "L"  { Start-Process "$ProjectDir\logs" }
         "l"  { Start-Process "$ProjectDir\logs" }
         "S"  { Setup-Schedule }

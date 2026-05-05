@@ -371,6 +371,17 @@ const durationMs = Date.now() - startTime;
 const fullReportPath = buildReport({ systemResults, runMeta: { startTime, durationMs } });
 log.info('report', 'Полный HTML-отчёт сохранён', { path: fullReportPath });
 
+// Live-монитор (v2): тот же отчёт, но всегда по фиксированному пути с
+// meta-refresh. Открываешь reports/live.html в браузере — обновляется сам.
+const liveReportPath = path.join(ROOT, 'reports', 'live.html');
+buildReport({
+  systemResults,
+  runMeta:    { startTime, durationMs },
+  outputPath: liveReportPath,
+  liveMode:   true,
+});
+log.info('report', 'Live-монитор обновлён', { path: liveReportPath });
+
 // Отдельные отчёты по группам (для email)
 let totalIssues = 0;
 const groupReports = [];
