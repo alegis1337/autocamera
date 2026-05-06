@@ -8,16 +8,14 @@
  *   node src/index.js --dry-run --only noviy-ceh  — только одна система
  *   node src/index.js --debug                     — подробные логи
  *   node src/index.js --reset-state               — обнулить helpdesk-state.json
- *   node src/index.js --no-diagnose               — отключить активную диагностику
  *   node src/index.js --no-snapshots              — не снимать кадры и не лезть на Я.Диск
  *
  * v2 features:
  *   • helpdesk-state в state/helpdesk-state.json — заявки уходят только
  *     при смене статуса (active↔broken). См. src/state.js.
- *   • Активная диагностика — после чекеров пингуем регистратор/камеру
- *     и формулируем причину + рекомендацию. См. src/diagnose.js.
  *   • Snapshots → Я.Диск — кадры online-камер заливаются в облако с
  *     публичными ссылками. См. src/snapshots.js + src/yandex-disk.js.
+ *   • Live-монитор reports/live.html — auto-refresh 30 сек.
  */
 
 import fs from 'fs';
@@ -33,7 +31,6 @@ import { checkRecordingsSystem } from './recordings-check.js';
 import { checkHikvisionMultiSystem } from './hikvision-multi.js';
 import { checkRostelecomSystem } from './rostelecom-check.js';
 import { loadState, saveState, resetState, diffAndUpdate } from './state.js';
-import { diagnoseAll } from './diagnose.js';
 import { captureAll, cleanupRun } from './snapshots.js';
 import { uploadAndPublish, cleanupOlderThan } from './yandex-disk.js';
 
@@ -50,7 +47,6 @@ const isDryRun     = args.includes('--dry-run');
 const isTestEmail  = args.includes('--test-email');
 const isDebug      = args.includes('--debug');
 const isResetState = args.includes('--reset-state');
-const isNoDiagnose = args.includes('--no-diagnose');
 const isNoSnapshots = args.includes('--no-snapshots');
 const onlyId       = (() => {
   const idx = args.indexOf('--only');
@@ -349,24 +345,6 @@ for (let i = 0; i < systems.length; i++) {
   log.warn(sys.id, `Неизвестный тип системы: ${sys.type}. Пропускаю.`);
   result.error = `Неизвестный тип проверки: ${sys.type}`;
   systemResults.push(result);
-}
-
-// ─── Активная диагностика (v2) ────────────────────────────────────────────────
-// Для всех сломанных камер запускаем ping/port-check и формулируем причину.
-// Можно отключить флагом --no-diagnose. Лимит MAX_DIAGNOSE защищает от
-// массового сбоя (если падает всё — не имеет смысла диагностировать каждую).
-if (!isNoDiagnose) {
-  const maxDiag = parseInt(process.env.MAX_DIAGNOSE || '30', 10);
-  log.stepStart('diagnose', 'Активная диагностика сломанных камер', { max: maxDiag });
-  try {
-    const { diagnosed, skipped } = await diagnoseAll(systemResults, { max: maxDiag, concurrency: 8 });
-    log.stepEnd('diagnose', 'ok',
-      `Диагностика завершена: ${diagnosed} проверено, ${skipped} пропущено (cap ${maxDiag})`);
-  } catch (err) {
-    log.stepEnd('diagnose', 'fail', 'Диагностика прервалась', { error: err.message });
-  }
-} else {
-  log.info('diagnose', 'Активная диагностика отключена (--no-diagnose)');
 }
 
 // ─── Snapshots → Yandex.Disk (v2) ─────────────────────────────────────────────
