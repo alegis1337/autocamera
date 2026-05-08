@@ -13,7 +13,7 @@
 | Scheduled task | `AutoCamera Monitor` | **нет** (только ручной запуск) |
 | `.env` получатели | реальные клиенты | `alegis1337@gmail.com` |
 | `HELPDESK_TO` | `helpdesk@dc1c.ru` | пусто (заявки не идут) |
-| Я.Диск папка | `/AutoCamera` | `/AutoCamera-test` |
+| Битрикс webhook | прод-вебхук + папка `AutoCamera` | dev-вебхук + папка `AutoCamera-test` |
 | `TEST_MODE` | unset | `true` |
 
 Папка v2 — это **git worktree**, не отдельный клон. У них общий `.git`.
@@ -66,7 +66,7 @@ git branch -D v2-dev
 
 1. **State + dedupe** — заявки в helpdesk только при смене статуса.
 2. **Diagnose** — активная диагностика причин падения.
-3. **Snapshots + Я.Диск** — кадры с камер на облаке.
+3. **Snapshots + Битрикс Диск** — кадры с камер в облаке.
 4. **Live-monitor** — `reports/live.html` с auto-refresh.
 
 Реализуются в указанном порядке.

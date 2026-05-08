@@ -13,8 +13,8 @@
  * v2 features:
  *   • helpdesk-state в state/helpdesk-state.json — заявки уходят только
  *     при смене статуса (active↔broken). См. src/state.js.
- *   • Snapshots → Я.Диск — кадры online-камер заливаются в облако с
- *     публичными ссылками. См. src/snapshots.js + src/yandex-disk.js.
+ *   • Snapshots → Битрикс Диск — кадры online-камер заливаются в Битрикс
+ *     с публичными ссылками. См. src/snapshots.js + src/bitrix-disk.js.
  *   • Live-монитор reports/live.html — auto-refresh 30 сек.
  */
 
@@ -32,7 +32,7 @@ import { checkHikvisionMultiSystem } from './hikvision-multi.js';
 import { checkRostelecomSystem } from './rostelecom-check.js';
 import { loadState, saveState, resetState, diffAndUpdate } from './state.js';
 import { captureAll, cleanupRun } from './snapshots.js';
-import { uploadAndPublish, cleanupOlderThan } from './yandex-disk.js';
+import { uploadAndPublish, cleanupOlderThan } from './bitrix-disk.js';
 
 // ─── Load .env ────────────────────────────────────────────────────────────────
 const dotenvPath = path.resolve('.env');
@@ -82,7 +82,7 @@ if (process.env.TEST_MODE === 'true') {
     `║  REPORT_TO_ONLINE:    ${truncate(process.env.REPORT_TO_ONLINE, 47).padEnd(47)}║`,
     `║  REPORT_TO (fallback):${truncate(process.env.REPORT_TO, 47).padEnd(47)}║`,
     `║  HELPDESK_TO:         ${truncate(process.env.HELPDESK_TO, 47).padEnd(47)}║`,
-    `║  YANDEX_DISK_ROOT:    ${truncate(process.env.YANDEX_DISK_ROOT, 47).padEnd(47)}║`,
+    `║  BITRIX_WEBHOOK_URL:  ${truncate(process.env.BITRIX_WEBHOOK_URL, 47).padEnd(47)}║`,
     '╚══════════════════════════════════════════════════════════════════════╝',
     '',
   ].join('\n');
@@ -347,21 +347,20 @@ for (let i = 0; i < systems.length; i++) {
   systemResults.push(result);
 }
 
-// ─── Snapshots → Yandex.Disk (v2) ─────────────────────────────────────────────
-// Захватываем кадры с онлайн-камер, грузим на Я.Диск, в каждом cam.snapshotUrl
-// сохраняем публичную ссылку. Без YANDEX_DISK_TOKEN — фича пропускается.
-const yToken    = process.env.YANDEX_DISK_TOKEN || '';
-const yRoot     = process.env.YANDEX_DISK_ROOT  || '/AutoCamera';
-const yRetention = parseInt(process.env.SNAPSHOT_RETENTION_DAYS || '30', 10);
+// ─── Snapshots → Битрикс Диск (v2) ────────────────────────────────────────────
+// Захватываем кадры с онлайн-камер, грузим в Битрикс Диск, в cam.snapshotUrl
+// сохраняем публичную ссылку. Без BITRIX_WEBHOOK_URL — фича пропускается.
+const bxWebhook   = process.env.BITRIX_WEBHOOK_URL    || '';
+const bxRoot      = process.env.BITRIX_ROOT_FOLDER_ID || '';
+const bxRetention = parseInt(process.env.SNAPSHOT_RETENTION_DAYS || '30', 10);
 
-if (!isNoSnapshots && yToken) {
-  // runId формата 2026-05-05-1100 — он же будет именем папок локально и на Я.Диске
+if (!isNoSnapshots && bxWebhook && bxRoot) {
+  // runId формата 2026-05-05-1100 — он же имя папок локально и в Битриксе
   const dt = new Date(startTime);
   const ymd = dt.toISOString().slice(0, 10);                 // 2026-05-05
   const hm  = String(dt.getHours()).padStart(2, '0')
             + String(dt.getMinutes()).padStart(2, '0');      // 1100
-  const runId      = `${ymd}-${hm}`;
-  const remoteBase = `${yRoot}/${ymd}/${hm}`;
+  const runId = `${ymd}-${hm}`;
 
   log.stepStart('snapshots', 'Захват кадров с камер');
   let captured = [];
@@ -374,14 +373,17 @@ if (!isNoSnapshots && yToken) {
   const errCount = captured.length - okCount;
   log.stepEnd('snapshots', 'ok', `Кадры сняты: ${okCount} ok, ${errCount} с ошибкой`);
 
-  // Заливка на Я.Диск (последовательно — чтобы не упереться в 429)
-  log.stepStart('yandex-disk', 'Загрузка кадров на Я.Диск', { root: remoteBase });
+  // Заливка в Битрикс Диск (последовательно — Битрикс плохо переносит параллель
+  // через webhook из-за rate-limit ~50 req/sec)
+  log.stepStart('bitrix-disk', 'Загрузка кадров в Битрикс Диск', { rootId: bxRoot });
   let uploaded = 0, uploadErrors = 0;
   for (const item of captured) {
     if (!item.localPath) continue;
-    const remotePath = `${remoteBase}/${item.sysId}/${path.basename(item.localPath)}`;
-    const url = await uploadAndPublish(item.localPath, remotePath, {
-      onError: (err, stage) => log.warn('yandex-disk', `${stage} ${item.sysId}/${item.camName}: ${err.message}`),
+    // Структура: <ROOT>/<YYYY-MM-DD>/<HHmm>/<systemId>/<filename>
+    const subPath  = [ymd, hm, item.sysId];
+    const fileName = path.basename(item.localPath);
+    const url = await uploadAndPublish(item.localPath, subPath, fileName, {
+      onError: (err, stage) => log.warn('bitrix-disk', `${stage} ${item.sysId}/${item.camName}: ${err.message}`),
     });
     if (url) {
       uploaded++;
@@ -393,25 +395,28 @@ if (!isNoSnapshots && yToken) {
       uploadErrors++;
     }
   }
-  log.stepEnd('yandex-disk', uploadErrors === 0 ? 'ok' : 'warn',
+  log.stepEnd('bitrix-disk', uploadErrors === 0 ? 'ok' : 'warn',
     `Загружено: ${uploaded} ok, ${uploadErrors} с ошибкой`);
 
   // Удаляем локальные временные файлы
   cleanupRun(runId);
 
-  // Retention-чистка старых папок на Я.Диске
-  if (yRetention > 0) {
+  // Retention-чистка старых YYYY-MM-DD папок в Битриксе
+  if (bxRetention > 0) {
     try {
-      const { deleted, kept } = await cleanupOlderThan(yRoot, yRetention);
-      if (deleted > 0) log.info('yandex-disk', `Retention: удалено ${deleted} старых папок (>${yRetention}д), оставлено ${kept}`);
+      const { deleted, kept } = await cleanupOlderThan(bxRoot, bxRetention);
+      if (deleted > 0) log.info('bitrix-disk',
+        `Retention: удалено ${deleted} старых папок (>${bxRetention}д), оставлено ${kept}`);
     } catch (err) {
-      log.warn('yandex-disk', 'Retention-чистка не сработала', { error: err.message });
+      log.warn('bitrix-disk', 'Retention-чистка не сработала', { error: err.message });
     }
   }
 } else if (isNoSnapshots) {
   log.info('snapshots', 'Снимки отключены (--no-snapshots)');
+} else if (!bxWebhook) {
+  log.info('snapshots', 'BITRIX_WEBHOOK_URL не задан — снимки пропускаем');
 } else {
-  log.info('snapshots', 'YANDEX_DISK_TOKEN не задан — снимки пропускаем');
+  log.info('snapshots', 'BITRIX_ROOT_FOLDER_ID не задан — запустите node src/bitrix-disk.js init-folder');
 }
 
 // ─── Build & send report per group ────────────────────────────────────────────
