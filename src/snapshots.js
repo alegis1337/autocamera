@@ -139,8 +139,36 @@ async function snapRtsp(sys, cam, localPath) {
 }
 
 /**
+ * Кэш sid TRASSIR per host:port. Хранит Promise<sid>, чтобы N параллельных
+ * snapTrassir для одной системы делали ровно один login.
+ */
+const trassirSidCache = new Map();
+
+function loginTrassir(host, port, user, pass) {
+  const loginPath = `/login?username=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`;
+  return trassirJson(host, port, loginPath).then((json) => {
+    if (!json.sid) throw new Error('login: пустой sid');
+    return json.sid;
+  });
+}
+
+async function getTrassirSid(host, port, user, pass) {
+  const key = `${host}:${port}`;
+  if (!trassirSidCache.has(key)) {
+    // Кладём промис в кэш ДО await — все одновременные вызовы получат его
+    trassirSidCache.set(key, loginTrassir(host, port, user, pass).catch((err) => {
+      // При ошибке убираем из кэша, чтобы следующий вызов мог попробовать ещё
+      trassirSidCache.delete(key);
+      throw err;
+    }));
+  }
+  return trassirSidCache.get(key);
+}
+
+/**
  * Snapshot через TRASSIR SDK.
- * Делаем свой login (sid), затем GET /screenshot?channel=<guid>&sid=...
+ * Login кэшируется per host:port — все 22 камеры одного TRASSIR'а используют
+ * один sid (полученный одним запросом).
  */
 async function snapTrassir(sys, cam) {
   const host = sys.host;
@@ -152,15 +180,12 @@ async function snapTrassir(sys, cam) {
   // Найти guid камеры в sys.cameraGuids: значение = name → ключ = guid
   const guids = sys.cameraGuids || {};
   const guid = Object.entries(guids).find(([_, v]) => v === cam.name)?.[0];
-  if (!guid) return { ok: false, error: 'guid не найден в sys.cameraGuids' };
+  if (!guid) return { ok: false, error: `guid не найден в cameraGuids для "${cam.name}"` };
 
-  // Login
+  // Login (через кэш — один раз на host:port)
   let sid;
   try {
-    const loginPath = `/login?username=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`;
-    const json = await trassirJson(host, port, loginPath);
-    sid = json.sid;
-    if (!sid) return { ok: false, error: 'login: пустой sid' };
+    sid = await getTrassirSid(host, port, user, pass);
   } catch (err) {
     return { ok: false, error: `login: ${err.message}` };
   }
@@ -285,6 +310,9 @@ export async function captureAll(systemResults, runId, options = {}) {
       const { sys, cam } = targets[idx];
       try {
         const r = await captureSnapshot(runId, sys, cam);
+        if (!r.ok) {
+          log.warn('snapshot', `${sys.id}/${cam.name}: ${r.error}`);
+        }
         out[idx] = {
           sysId: sys.id,
           camIndex: cam.index,
@@ -293,6 +321,7 @@ export async function captureAll(systemResults, runId, options = {}) {
           error:     r.ok ? null         : r.error,
         };
       } catch (err) {
+        log.warn('snapshot', `${sys.id}/${cam.name}: ${err.message}`);
         out[idx] = { sysId: sys.id, camIndex: cam.index, camName: cam.name, localPath: null, error: err.message };
       }
     }

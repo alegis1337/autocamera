@@ -57,10 +57,16 @@ async function callBitrix(method, params = {}) {
     }
   }
 
+  // Timeout на каждый запрос. uploadfile может быть тяжёлым (большой base64),
+  // остальные методы быстрые. Дефолт 30с — этого хватает с запасом.
+  const REQUEST_TIMEOUT_MS = 30000;
+
   let lastErr;
   for (let attempt = 0; attempt < 2; attempt++) {
+    const ac = new AbortController();
+    const t  = setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const res = await fetch(url, { method: 'POST', body });
+      const res = await fetch(url, { method: 'POST', body, signal: ac.signal });
       const text = await res.text();
       let json;
       try { json = JSON.parse(text); }
@@ -76,10 +82,14 @@ async function callBitrix(method, params = {}) {
       }
       return json.result;
     } catch (err) {
-      lastErr = err;
+      lastErr = err.name === 'AbortError'
+        ? new Error(`таймаут ${REQUEST_TIMEOUT_MS / 1000}с (${method})`)
+        : err;
       // Логические ошибки Битрикса не ретраим
-      if (/^[A-Z_]+:/.test(err.message)) break;
+      if (/^[A-Z_]+:/.test(lastErr.message)) break;
       if (attempt === 0) await new Promise(r => setTimeout(r, 2000));
+    } finally {
+      clearTimeout(t);
     }
   }
   throw lastErr;
