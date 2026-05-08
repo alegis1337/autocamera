@@ -1,6 +1,6 @@
 # AutoCamera Monitor
 $ProjectDir = "C:\Users\dsadmin\Desktop\autocamera"
-$Version    = "v1.0"
+$Version    = "v1.0.1"
 Set-Location $ProjectDir
 
 function Get-EnvValue {
