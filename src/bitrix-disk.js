@@ -170,6 +170,30 @@ export async function ensureFolderPath(parentId, parts) {
   return cur;
 }
 
+// ─── Операции с файлами ─────────────────────────────────────────────────────
+
+/**
+ * Ищет файл по имени в папке folderId. Возвращает объект файла или null.
+ */
+export async function findFileByName(folderId, name) {
+  const items = await listFolderChildren(folderId);
+  return items.find(it => it.TYPE === 'file' && it.NAME === name) || null;
+}
+
+/**
+ * Переименовывает файл (в той же папке).
+ */
+export async function renameFile(fileId, newName) {
+  return await callBitrix('disk.file.rename', { id: fileId, newName });
+}
+
+/**
+ * Перемещает файл в другую папку.
+ */
+export async function moveFile(fileId, targetFolderId) {
+  return await callBitrix('disk.file.moveto', { id: fileId, targetFolderId });
+}
+
 // ─── Загрузка файла ──────────────────────────────────────────────────────────
 
 /**
@@ -235,28 +259,44 @@ export async function deleteResource(id, isFolder = false) {
 // ─── Retention ───────────────────────────────────────────────────────────────
 
 /**
- * Удаляет YYYY-MM-DD-подпапки внутри rootFolderId, имена которых задают
- * дату старше N дней.
+ * Чистит архивные файлы старше N дней.
+ *
+ * Заходит в каждую подпапку объекта (Производство, Офис, …) под
+ * rootFolderId, и удаляет из её подпапки archive/ все файлы, у которых
+ * в имени есть суффикс "-YYYY-MM-DD-HHMM" с датой старше cutoff.
+ *
+ * Активные (без суффикса) файлы в самой папке объекта не трогает.
  *
  * @returns {Promise<{deleted:number, kept:number}>}
  */
 export async function cleanupOlderThan(rootFolderId, days) {
   if (!days || days <= 0) return { deleted: 0, kept: 0 };
-  const items = await listFolderChildren(rootFolderId);
   const cutoff = Date.now() - days * 86400_000;
 
   let deleted = 0, kept = 0;
-  for (const it of items) {
-    if (it.TYPE !== 'folder') { kept++; continue; }
-    const m = it.NAME.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (!m) { kept++; continue; }
-    const ts = Date.parse(`${m[1]}-${m[2]}-${m[3]}T00:00:00Z`);
-    if (isNaN(ts) || ts >= cutoff) { kept++; continue; }
-    try {
-      await deleteResource(it.ID, true);
-      deleted++;
-    } catch {
-      kept++;
+  const objects = await listFolderChildren(rootFolderId);
+
+  for (const obj of objects) {
+    if (obj.TYPE !== 'folder') continue;
+    // Ищем подпапку archive/ внутри объекта
+    const children = await listFolderChildren(obj.ID);
+    const archive  = children.find(c => c.TYPE === 'folder' && c.NAME === 'archive');
+    if (!archive) continue;
+
+    const files = await listFolderChildren(archive.ID);
+    for (const f of files) {
+      if (f.TYPE !== 'file') continue;
+      // Ожидаем "<base>-YYYY-MM-DD-HHMM.<ext>" в имени
+      const m = f.NAME.match(/-(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})\./);
+      if (!m) { kept++; continue; }
+      const ts = Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00Z`);
+      if (isNaN(ts) || ts >= cutoff) { kept++; continue; }
+      try {
+        await deleteResource(f.ID, false);
+        deleted++;
+      } catch {
+        kept++;
+      }
     }
   }
   return { deleted, kept };
@@ -265,18 +305,29 @@ export async function cleanupOlderThan(rootFolderId, days) {
 // ─── Высокоуровневая обёртка ─────────────────────────────────────────────────
 
 /**
- * Полный цикл "залить + получить публичную ссылку".
- * Создаёт нужную структуру папок (через ensureFolderPath относительно
- * BITRIX_ROOT_FOLDER_ID), загружает файл, возвращает публичный URL.
+ * Полный цикл «свежий кадр + история»:
+ *   1. Если в папке объекта уже есть файл с этим именем — переносим его в
+ *      подпапку archive/ под именем "<base>-<timestamp>.<ext>".
+ *   2. Загружаем новый файл в папку объекта под исходным именем.
+ *   3. Возвращаем публичную ссылку на новый файл.
  *
- * @param {string} localPath
- * @param {string[]} subPath  — например ['2026-05-08', '0900', 'ivms']
- * @param {string} fileName   — имя файла на диске
- * @param {object} [options]
- * @param {Function} [options.onError] — (err, stage) => void
- * @returns {Promise<string|null>}
+ * После применения структура на Битрикс-Диске выглядит так:
+ *   AutoCamera/<objectName>/
+ *     201.jpg            ← всегда последний кадр
+ *     202.jpg
+ *     archive/
+ *       201-2026-05-08-1230.jpg
+ *       201-2026-05-08-1530.jpg
+ *
+ * @param {string}  localPath
+ * @param {string}  objectName  — например "Производство" (без " (TRASSIR)")
+ * @param {string}  fileName    — например "201.jpg"
+ * @param {string}  archiveTs   — суффикс для архивной копии: "2026-05-08-1230"
+ * @param {object}  [options]
+ * @param {Function}[options.onError] — (err, stage) => void
+ * @returns {Promise<string|null>} — публичная ссылка нового файла
  */
-export async function uploadAndPublish(localPath, subPath, fileName, options = {}) {
+export async function uploadCurrentWithArchive(localPath, objectName, fileName, archiveTs, options = {}) {
   const onError = options.onError || (() => {});
   const rootId = process.env.BITRIX_ROOT_FOLDER_ID;
   if (!rootId) {
@@ -284,22 +335,50 @@ export async function uploadAndPublish(localPath, subPath, fileName, options = {
     return null;
   }
 
-  let folderId;
+  // 1. Папка объекта + подпапка archive/
+  let objectFolderId, archiveFolderId;
   try {
-    folderId = await ensureFolderPath(rootId, subPath);
+    objectFolderId = await ensureFolderPath(rootId, [objectName]);
+    archiveFolderId = (await ensureSubfolder(objectFolderId, 'archive')).ID;
   } catch (err) {
-    onError(err, 'ensureFolderPath');
+    onError(err, 'ensureFolders');
     return null;
   }
 
+  // 2. Если файл уже есть — двигаем его в archive/ под именем с timestamp
+  try {
+    const existing = await findFileByName(objectFolderId, fileName);
+    if (existing) {
+      const dot = fileName.lastIndexOf('.');
+      const base = dot > 0 ? fileName.slice(0, dot) : fileName;
+      const ext  = dot > 0 ? fileName.slice(dot)   : '';
+      const archiveName = `${base}-${archiveTs}${ext}`;
+      try {
+        await moveFile(existing.ID, archiveFolderId);
+        await renameFile(existing.ID, archiveName);
+      } catch (mvErr) {
+        // Если перенос не удался — терпимо: просто удалим старый, чтобы
+        // освободить имя для нового. Альтернатива — getuniquename, но это
+        // плохо для главного файла-«всегда последнего».
+        onError(mvErr, 'archive-old');
+        try { await deleteResource(existing.ID, false); } catch {}
+      }
+    }
+  } catch (err) {
+    onError(err, 'findExisting');
+    // не критично, продолжаем загрузку
+  }
+
+  // 3. Загружаем новый файл под исходным именем
   let fileObj;
   try {
-    fileObj = await uploadFile(localPath, folderId, fileName);
+    fileObj = await uploadFile(localPath, objectFolderId, fileName);
   } catch (err) {
     onError(err, 'uploadFile');
     return null;
   }
 
+  // 4. Публичная ссылка
   try {
     return await getExternalLink(fileObj.ID);
   } catch (err) {

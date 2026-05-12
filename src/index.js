@@ -32,7 +32,7 @@ import { checkHikvisionMultiSystem } from './hikvision-multi.js';
 import { checkRostelecomSystem } from './rostelecom-check.js';
 import { loadState, saveState, resetState, diffAndUpdate } from './state.js';
 import { captureAll, cleanupRun } from './snapshots.js';
-import { uploadAndPublish, cleanupOlderThan } from './bitrix-disk.js';
+import { uploadCurrentWithArchive, cleanupOlderThan } from './bitrix-disk.js';
 
 // ─── Load .env ────────────────────────────────────────────────────────────────
 const dotenvPath = path.resolve('.env');
@@ -355,12 +355,20 @@ const bxRoot      = process.env.BITRIX_ROOT_FOLDER_ID || '';
 const bxRetention = parseInt(process.env.SNAPSHOT_RETENTION_DAYS || '30', 10);
 
 if (!isNoSnapshots && bxWebhook && bxRoot) {
-  // runId формата 2026-05-05-1100 — он же имя папок локально и в Битриксе
+  // runId — служебный идентификатор папки локального временного хранилища.
+  // На Битриксе структура другая: AutoCamera/<Объект>/<камера>.jpg + archive/
   const dt = new Date(startTime);
   const ymd = dt.toISOString().slice(0, 10);                 // 2026-05-05
   const hm  = String(dt.getHours()).padStart(2, '0')
             + String(dt.getMinutes()).padStart(2, '0');      // 1100
-  const runId = `${ymd}-${hm}`;
+  const runId    = `${ymd}-${hm}`;
+  const archiveTs = `${ymd}-${hm}`;                          // суффикс в archive
+
+  // "Производство (TRASSIR)" → "Производство" (имя папки объекта в Битриксе)
+  const objectName = (n) => (n || '').replace(/\s*\([^)]*\)\s*$/, '').trim();
+
+  // "00-201.jpg" → "201.jpg" (убираем числовой index-префикс)
+  const cleanFileName = (filename) => filename.replace(/^\d+-/, '');
 
   log.stepStart('snapshots', 'Захват кадров с камер');
   let captured = [];
@@ -373,23 +381,26 @@ if (!isNoSnapshots && bxWebhook && bxRoot) {
   const errCount = captured.length - okCount;
   log.stepEnd('snapshots', 'ok', `Кадры сняты: ${okCount} ok, ${errCount} с ошибкой`);
 
-  // Заливка в Битрикс Диск (последовательно — Битрикс плохо переносит параллель
-  // через webhook из-за rate-limit ~50 req/sec)
+  // Заливка в Битрикс Диск (последовательно — webhook rate-limit ~50 req/sec,
+  // а на одну камеру делается 3-4 запроса в Битрикс)
   log.stepStart('bitrix-disk', 'Загрузка кадров в Битрикс Диск', { rootId: bxRoot });
   let uploaded = 0, uploadErrors = 0;
   for (const item of captured) {
     if (!item.localPath) continue;
-    // Структура: <ROOT>/<YYYY-MM-DD>/<HHmm>/<systemId>/<filename>
-    const subPath  = [ymd, hm, item.sysId];
-    const fileName = path.basename(item.localPath);
-    const url = await uploadAndPublish(item.localPath, subPath, fileName, {
-      onError: (err, stage) => log.warn('bitrix-disk', `${stage} ${item.sysId}/${item.camName}: ${err.message}`),
+    const sys = systemResults.find(s => s.id === item.sysId);
+    if (!sys) continue;
+
+    const obj  = objectName(sys.name);
+    const file = cleanFileName(path.basename(item.localPath));
+
+    const url = await uploadCurrentWithArchive(item.localPath, obj, file, archiveTs, {
+      onError: (err, stage) => log.warn('bitrix-disk',
+        `${stage} ${obj}/${file}: ${err.message}`),
     });
     if (url) {
       uploaded++;
       // Прокидываем URL в объект камеры для рендеринга в отчёте
-      const sys = systemResults.find(s => s.id === item.sysId);
-      const cam = sys?.cameras?.find(c => c.index === item.camIndex);
+      const cam = sys.cameras?.find(c => c.index === item.camIndex);
       if (cam) cam.snapshotUrl = url;
     } else {
       uploadErrors++;
