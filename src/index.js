@@ -381,14 +381,17 @@ if (!isNoSnapshots && bxWebhook && bxRoot) {
   const errCount = captured.length - okCount;
   log.stepEnd('snapshots', 'ok', `Кадры сняты: ${okCount} ok, ${errCount} с ошибкой`);
 
-  // Заливка в Битрикс Диск (последовательно — webhook rate-limit ~50 req/sec,
-  // а на одну камеру делается 3-4 запроса в Битрикс)
-  log.stepStart('bitrix-disk', 'Загрузка кадров в Битрикс Диск', { rootId: bxRoot });
-  let uploaded = 0, uploadErrors = 0;
-  for (const item of captured) {
-    if (!item.localPath) continue;
+  // Заливка в Битрикс Диск с ограниченным параллелизмом. Webhook у Битрикса
+  // плохо переваривает большие тяжёлые base64-uploads подряд (TRASSIR HD-кадры
+  // ~700КБ × 1.33 base64 ≈ 1МБ в теле запроса). Concurrency=3 даёт ускорение
+  // ~3× и при этом остаётся в пределах rate-limit'а (50 req/sec на портал).
+  log.stepStart('bitrix-disk', 'Загрузка кадров в Битрикс Диск',
+    { rootId: bxRoot, concurrency: 3 });
+
+  const uploadOne = async (item) => {
+    if (!item.localPath) return false;
     const sys = systemResults.find(s => s.id === item.sysId);
-    if (!sys) continue;
+    if (!sys) return false;
 
     const obj  = objectName(sys.name);
     const file = cleanFileName(path.basename(item.localPath));
@@ -398,14 +401,30 @@ if (!isNoSnapshots && bxWebhook && bxRoot) {
         `${stage} ${obj}/${file}: ${err.message}`),
     });
     if (url) {
-      uploaded++;
-      // Прокидываем URL в объект камеры для рендеринга в отчёте
       const cam = sys.cameras?.find(c => c.index === item.camIndex);
       if (cam) cam.snapshotUrl = url;
-    } else {
-      uploadErrors++;
+      return true;
     }
-  }
+    return false;
+  };
+
+  let uploaded = 0, uploadErrors = 0;
+  let cursor = 0;
+  const workers = Array.from({ length: 3 }, async () => {
+    while (cursor < captured.length) {
+      const idx  = cursor++;
+      const item = captured[idx];
+      try {
+        const ok = await uploadOne(item);
+        if (ok) uploaded++; else uploadErrors++;
+      } catch (err) {
+        log.warn('bitrix-disk', `неожиданная ошибка: ${err.message}`);
+        uploadErrors++;
+      }
+    }
+  });
+  await Promise.all(workers);
+
   log.stepEnd('bitrix-disk', uploadErrors === 0 ? 'ok' : 'warn',
     `Загружено: ${uploaded} ok, ${uploadErrors} с ошибкой`);
 

@@ -57,9 +57,11 @@ async function callBitrix(method, params = {}) {
     }
   }
 
-  // Timeout на каждый запрос. uploadfile может быть тяжёлым (большой base64),
-  // остальные методы быстрые. Дефолт 30с — этого хватает с запасом.
-  const REQUEST_TIMEOUT_MS = 30000;
+  // Timeout: для лёгких методов 30с, для uploadfile (большой base64 в
+  // теле запроса, TRASSIR HD-кадры дают ~700КБ после base64-кодирования)
+  // — 90с. Webhook у Битрикса плохо переваривает крупные тела + 33%
+  // оверхеда от base64.
+  const REQUEST_TIMEOUT_MS = method === 'disk.folder.uploadfile' ? 90000 : 30000;
 
   let lastErr;
   for (let attempt = 0; attempt < 2; attempt++) {
