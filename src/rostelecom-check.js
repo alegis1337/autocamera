@@ -256,6 +256,9 @@ function mapApiToConfig(apiCams, configCameras, excludeApiNames = []) {
       audio: 'unknown',
       type: 'rt-portal',
       rtId: apiCam.id,
+      // UID нужен снапшоттеру (snapshots.js → snapRostelecom): по нему
+      // достаём JPEG из map'ы перехваченных портальных thumbnails.
+      uid:   apiCam.uid,
       notes: isOnline ? 'Online (портал РТ)' : `Offline — статус: ${apiCam.status || 'нет данных'}`,
     };
   });

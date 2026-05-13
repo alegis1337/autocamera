@@ -207,6 +207,120 @@ async function snapTrassir(sys, cam) {
   }
 }
 
+/**
+ * Snapshot Ростелекома: batch через Playwright.
+ *
+ * CDN Ростелекома режет fetch не из самого Chromium (IP-binding + Origin).
+ * Поэтому открываем портал в headless-браузере, дожидаемся пока сам React
+ * подгрузит thumbnails (по 1 на камеру), перехватываем response.body для
+ * каждой и складываем в Map<uid, Buffer>.
+ *
+ * Делаем это ОДИН РАЗ на прогон через кэш rostelecomBatchCache —
+ * 7 параллельных snapRostelecom получают одну общую Promise.
+ */
+const rostelecomBatchCache = new Map();  // sys.id → Promise<Map<uid, Buffer>>
+
+async function fetchRostelecomBatch(sys) {
+  // Lazy-import чтобы не платить за Playwright когда RT нет в прогоне
+  const { chromium } = await import('playwright');
+
+  const portalUrl = process.env[sys.portalUrlEnv] || sys.portalUrl || 'https://lk-b2b.camera.rt.ru';
+  const user      = process.env[sys.userEnv]      || sys.user || '';
+  const pass      = process.env[sys.passEnv]      || sys.pass || '';
+  if (!user || !pass) throw new Error('нет учётки RT_PORTAL_USER/PASS');
+
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const ctx = await browser.newContext({
+      ignoreHTTPSErrors: true,
+      viewport: { width: 1920, height: 1080 },
+    });
+    const page = await ctx.newPage();
+
+    // Перехватчик thumbnails
+    const buffers = new Map();    // uid → Buffer
+    page.on('response', async (resp) => {
+      try {
+        const u = resp.url();
+        if (!/cdn\.camera\.rt\.ru\/image\//.test(u)) return;
+        if (resp.status() !== 200) return;
+        const m = u.match(/\/image\/[^/]+\/([0-9a-f-]+)\//);
+        if (!m || buffers.has(m[1])) return;
+        const buf = await resp.body();
+        if (buf.length > 200) buffers.set(m[1], buf);
+      } catch { /* пропускаем */ }
+    });
+
+    // Login flow (тот же что в rostelecom-check.js)
+    await page.goto(`${portalUrl}/main/cameras`, {
+      waitUntil: 'domcontentloaded', timeout: 40_000,
+    }).catch(() => {});
+    await page.waitForURL('**/passport.rt.ru/**', { timeout: 30_000 }).catch(() => {});
+    await page.waitForSelector('input#username, input[type="text"]', {
+      state: 'attached', timeout: 20_000,
+    });
+    await page.waitForTimeout(2000);
+
+    // jsSetInput-аналог: passport.rt.ru видим только через React-setter
+    await page.evaluate(({ u, p }) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      const set = (sel, val) => {
+        const inp = document.querySelector(sel);
+        if (!inp) return;
+        setter.call(inp, val);
+        inp.dispatchEvent(new Event('input',  { bubbles: true }));
+        inp.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      set('input#username', u);
+      set('input#password', p);
+      const b = [...document.querySelectorAll('button')]
+        .find(x => x.textContent.trim() === 'Войти');
+      if (b) b.click(); else document.querySelector('form')?.submit();
+    }, { u: user, p: pass });
+
+    // Ждём возврат на портал
+    for (let i = 0; i < 30; i++) {
+      await page.waitForTimeout(1000);
+      const u = page.url();
+      if (u.includes('camera.rt.ru') && !u.includes('passport')) break;
+    }
+
+    // Дать порталу время подгрузить все thumbnails. Ждём пока соберём
+    // ожидаемое число камер (sys.cameras.length) или максимум 30 сек.
+    const expect = sys.cameras?.length || 8;
+    for (let i = 0; i < 30; i++) {
+      await page.waitForTimeout(1000);
+      if (buffers.size >= expect) break;
+    }
+
+    return buffers;
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+async function snapRostelecom(sys, cam) {
+  if (!cam.uid) return { ok: false, error: 'нет cam.uid (rostelecom-check не сохранил)' };
+
+  // Один batch-fetch per system; все 7 камер этого sys ждут общий promise.
+  let batchPromise = rostelecomBatchCache.get(sys.id);
+  if (!batchPromise) {
+    batchPromise = fetchRostelecomBatch(sys);
+    rostelecomBatchCache.set(sys.id, batchPromise);
+  }
+
+  let buffers;
+  try {
+    buffers = await batchPromise;
+  } catch (err) {
+    return { ok: false, error: `RT batch fetch: ${err.message}` };
+  }
+
+  const buf = buffers.get(cam.uid);
+  if (!buf) return { ok: false, error: `снимок ${cam.uid.slice(0, 8)}... не пойман порталом` };
+  return { ok: true, buffer: buf };
+}
+
 function trassirJson(host, port, pathQuery, timeoutMs = 6000) {
   return new Promise((resolve, reject) => {
     const req = https.get({ host, port, path: pathQuery, agent: trassirAgent, headers: { Accept: 'application/json' } }, (res) => {
@@ -267,6 +381,9 @@ export async function captureSnapshot(runId, sys, cam) {
       break;
     case 'trassir-sdk':
       result = await snapTrassir(sys, cam);
+      break;
+    case 'rt-portal':
+      result = await snapRostelecom(sys, cam);
       break;
     default:
       return { ok: false, error: `тип системы ${sys.type} не поддерживает снимки` };
