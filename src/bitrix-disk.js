@@ -139,23 +139,28 @@ async function findChildFolder(parentId, name) {
 
 /**
  * Создаёт подпапку (если уже есть с таким именем — возвращает существующую).
+ * Race-condition safe: при параллельных вызовах ловит DISK_OBJ_22000
+ * ("Папка с таким именем уже есть") и читает существующую.
  * @returns {Promise<{ID, NAME}>}
  */
 export async function ensureSubfolder(parentId, name) {
   const existing = await findChildFolder(parentId, name);
   if (existing) return existing;
 
-  const created = await callBitrix('disk.folder.addsubfolder', {
-    id: parentId,
-    'data[NAME]': name,
-  });
-  // Битрикс иногда возвращает ошибку "уже существует" — гонка race-condition
-  if (!created?.ID) {
-    const retry = await findChildFolder(parentId, name);
-    if (retry) return retry;
-    throw new Error(`не удалось создать папку ${name} в ${parentId}`);
+  try {
+    const created = await callBitrix('disk.folder.addsubfolder', {
+      id: parentId,
+      'data[NAME]': name,
+    });
+    if (created?.ID) return created;
+  } catch (err) {
+    // DISK_OBJ_22000 = "Папка с таким именем уже есть" (race с другим воркером)
+    if (!/DISK_OBJ_22000|уже есть/i.test(err.message)) throw err;
   }
-  return created;
+  // Параллельный воркер уже создал её — читаем
+  const retry = await findChildFolder(parentId, name);
+  if (retry) return retry;
+  throw new Error(`не удалось создать папку ${name} в ${parentId}`);
 }
 
 /**

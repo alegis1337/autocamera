@@ -117,6 +117,8 @@ async function snapRtsp(sys, cam, localPath) {
   }
   if (!rtspUrl) return { ok: false, error: 'не получилось собрать RTSP URL' };
 
+  // В ffmpeg 8 убрали -stimeout / -rw_timeout как глобальные опции —
+  // ограничиваемся жёстким timeout от execFile (15с).
   const args = [
     '-rtsp_transport', 'tcp',
     '-y',
@@ -128,13 +130,18 @@ async function snapRtsp(sys, cam, localPath) {
   ];
 
   try {
-    await execFileP(ffmpeg, args, { timeout: 10_000, windowsHide: true });
+    await execFileP(ffmpeg, args, { timeout: 15_000, windowsHide: true });
     if (!fs.existsSync(localPath) || fs.statSync(localPath).size < 200) {
       return { ok: false, error: 'ffmpeg создал пустой/слишком маленький файл' };
     }
     return { ok: true, fromFile: true };
   } catch (err) {
-    return { ok: false, error: `ffmpeg: ${err.message.slice(0, 120)}` };
+    // execFileP при non-zero exit добавляет stderr в err.stderr
+    const stderr = (err.stderr || '').toString().trim();
+    const reason = stderr
+      ? stderr.split('\n').slice(-2).join(' | ').slice(0, 200)
+      : err.message.slice(0, 200);
+    return { ok: false, error: `ffmpeg: ${reason}` };
   }
 }
 

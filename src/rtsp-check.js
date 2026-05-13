@@ -233,6 +233,11 @@ export async function checkCamerasByRtsp(cameras, user, pass, systemId = 'rtsp',
       type: 'ip',
       resolution: desc.resolution || '',
       ip: cam.ip,
+      // Сохраняем поля из config — нужны snapshots.js → snapRtsp() для
+      // сборки RTSP URL (через NVR или напрямую на камеру)
+      viaNvr:     cam.viaNvr,
+      rtspPath:   cam.rtspPath,
+      nvrChannel: cam.nvrChannel,
       videoOk,
       notes,
     });
