@@ -32,7 +32,7 @@ import { checkHikvisionMultiSystem } from './hikvision-multi.js';
 import { checkRostelecomSystem } from './rostelecom-check.js';
 import { loadState, saveState, resetState, diffAndUpdate } from './state.js';
 import { captureAll, cleanupRun } from './snapshots.js';
-import { uploadCurrentWithArchive, cleanupOlderThan } from './bitrix-disk.js';
+import { uploadFreshSnapshot, cleanupOlderThan } from './bitrix-disk.js';
 
 // ─── Load .env ────────────────────────────────────────────────────────────────
 const dotenvPath = path.resolve('.env');
@@ -356,13 +356,13 @@ const bxRetention = parseInt(process.env.SNAPSHOT_RETENTION_DAYS || '30', 10);
 
 if (!isNoSnapshots && bxWebhook && bxRoot) {
   // runId — служебный идентификатор папки локального временного хранилища.
-  // На Битриксе структура другая: AutoCamera/<Объект>/<камера>.jpg + archive/
+  // На Битриксе структура: AutoCamera/<Группа>/<Объект>/<YYYY-MM-DD>/<кам>.jpg
+  // Повторный прогон в тот же день — перезаписывает файл в текущей папке-дате.
   const dt = new Date(startTime);
-  const ymd = dt.toISOString().slice(0, 10);                 // 2026-05-05
+  const ymd = dt.toISOString().slice(0, 10);                 // 2026-05-13
   const hm  = String(dt.getHours()).padStart(2, '0')
             + String(dt.getMinutes()).padStart(2, '0');      // 1100
-  const runId    = `${ymd}-${hm}`;
-  const archiveTs = `${ymd}-${hm}`;                          // суффикс в archive
+  const runId = `${ymd}-${hm}`;
 
   // "Производство (TRASSIR)" → "Производство" (имя папки объекта в Битриксе)
   const objectName = (n) => (n || '').replace(/\s*\([^)]*\)\s*$/, '').trim();
@@ -393,12 +393,14 @@ if (!isNoSnapshots && bxWebhook && bxRoot) {
     const sys = systemResults.find(s => s.id === item.sysId);
     if (!sys) return false;
 
-    const obj  = objectName(sys.name);
-    const file = cleanFileName(path.basename(item.localPath));
+    const group = sys.group || 'Прочее';
+    const obj   = objectName(sys.name);
+    const file  = cleanFileName(path.basename(item.localPath));
+    const subPath = [group, obj, ymd];
 
-    const url = await uploadCurrentWithArchive(item.localPath, obj, file, archiveTs, {
+    const url = await uploadFreshSnapshot(item.localPath, subPath, file, {
       onError: (err, stage) => log.warn('bitrix-disk',
-        `${stage} ${obj}/${file}: ${err.message}`),
+        `${stage} ${group}/${obj}/${file}: ${err.message}`),
     });
     if (url) {
       const cam = sys.cameras?.find(c => c.index === item.camIndex);
