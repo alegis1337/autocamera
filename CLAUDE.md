@@ -1,208 +1,251 @@
 # AutoCamera Monitor — инструкции для агента
-**Версия:** v1.0.1 | **Проект:** `C:\Users\dsadmin\Desktop\autocamera`
+**Версия:** v2.0 | **Проект:** `C:\Users\dsadmin\Desktop\autocamera`
 
 Автоматизированный мониторинг камер: проверяет 9 систем (Европласт + Онлайн),
-формирует HTML-отчёт, рассылает письма заказчику и helpdesk.
-Запуск по расписанию через Планировщик задач Windows — **человек не наблюдает**.
-Работа без интерактивных подтверждений и без ожидания ввода.
+формирует HTML-отчёт со скриншотами камер, рассылает письма заказчику и
+helpdesk. Запуск по расписанию через Планировщик задач Windows — **человек
+не наблюдает**. Работа без интерактивных подтверждений и без ожидания ввода.
 
 Все комментарии и логи — **только на русском**.
 
 ---
 
+## Что нового в v2 (по сравнению с v1)
+
+1. **Два режима запуска**: `--light` каждые 15 минут (быстрая проверка статусов
+   + обновление `reports/live.html`) и `--daily` раз в день (полный прогон со
+   снимками камер, email-отчёты, helpdesk).
+2. **Снимки камер в отчёте** — миниатюры под каждым тайлом. Источник —
+   локальный кэш «последнего рабочего снимка» (`screenshots/last-good/`).
+   Полные снимки заливаются в Bitrix24 Disk.
+3. **Live-монитор** — `reports/live.html` обновляется light-прогонами, имеет
+   `meta-refresh` 30 сек.
+4. **Отчёт за период** — пункт `H` в меню, аггрегирует все
+   `state/timeline-YYYY-MM-DD.json` за указанный диапазон.
+5. **Helpdesk-дедупликация** — `state/helpdesk-state.json` отслеживает текущее
+   состояние, письмо уходит только при смене статуса камеры (broken↔active).
+6. **Мастер добавления нового устройства** — пункт `G → A` в меню. Скрипт
+   `src/detect-device.js` пробует Hikvision ISAPI / TRASSIR SDK / BEWARD /
+   RTSP по IP, угадывает тип и предлагает прописать в `systems.json`.
+
+---
+
 ## Архитектура
 
-Вместо браузера и AI-анализа картинок — прямые API и сетевые проверки:
-
 ```
-AutoCamera Monitor (Node.js, ES modules)
+AutoCamera Monitor (Node.js ≥ 18, ES modules)
 │
 ├── Европласт (группа "Европласт")
-│   ├── trassir          → TRASSIR SDK HTTP API (10.0.120.195:8080)
-│   ├── ipanda-office    → RTSP DESCRIBE через NVR (10.0.120.192)
-│   ├── hiwatch-sklad    → Hikvision ISAPI (10.0.120.30)
-│   ├── ipanda-noviy-ceh → RTSP DESCRIBE через NVR (10.0.120.220)
-│   ├── evroplast-stroyka→ SMB — свежесть + качество (размер чанков)
-│   └── hiwatch-vyduv    → Hikvision ISAPI (HIWATCH_VYDUV_*)
+│   ├── trassir            → TRASSIR SDK HTTP API (10.0.120.195:8080)
+│   ├── ipanda-office      → RTSP DESCRIBE через NVR (10.0.120.192)
+│   ├── hiwatch-sklad      → Hikvision ISAPI (10.0.120.30)
+│   ├── ipanda-noviy-ceh   → RTSP DESCRIBE через NVR (10.0.120.220)
+│   ├── evroplast-stroyka  → SMB-папки записей: \\10.0.120.4\Video\{9,11,13}
+│   └── hiwatch-vyduv      → Hikvision ISAPI
 │
 └── Онлайн (группа "Онлайн")
-    ├── beward           → SMB freshness (порог 180 мин) + ping
-    ├── ivms             → Hikvision ISAPI per-camera
-    └── rostelecom       → портал lk-b2b.camera.rt.ru (Playwright headless)
+    ├── beward             → SMB-шара \\192.168.99.122 freshness + ping
+    ├── ivms               → Hikvision ISAPI per-camera (3 точки)
+    └── rostelecom         → портал lk-b2b.camera.rt.ru (Playwright headless)
 ```
 
-Никакого облачного AI, никаких скриншотов для распознавания. Только
-детерминированные запросы к API / SMB / RTSP / ISAPI. Ростелеком —
-единственный случай, где нужен headless-браузер, т.к. у него нет открытого API.
+Никакого облачного AI. Только детерминированные запросы к API / SMB / RTSP /
+ISAPI. Ростелеком — единственный случай, где нужен headless-браузер.
 
 ---
 
 ## Окружение
 
-| Элемент           | Значение                                               |
-|-------------------|--------------------------------------------------------|
-| ОС                | Windows 10/11 (ВМ)                                     |
-| Runtime           | Node.js ≥ 20, ES modules                               |
-| Корень проекта    | `C:\Users\dsadmin\Desktop\autocamera`                  |
-| Секреты           | `.env` (см. `.env.example`)                            |
-| Системы           | `config\systems.json` (9 систем, поле `group`)         |
-| Настройки         | `config\settings.json`                                 |
-| Запуск вручную    | `AutoCamera.bat` → `menu.ps1` (PowerShell UI)          |
-| Запуск cron       | Windows Task Scheduler, `npm start`                    |
+| Элемент | Значение |
+|---|---|
+| ОС | Windows 10/11 (VM) |
+| Runtime | Node.js ≥ 18, ES modules |
+| Корень | `C:\Users\dsadmin\Desktop\autocamera` |
+| Секреты | `.env` (см. ниже) |
+| Системы | `config\systems.json` (9 систем, поле `group`) |
+| Расписание | `config\schedule.json` (`light` + `daily` секции) |
+| Локальный snapshot-кэш | `screenshots\last-good\<sysId>\<idx>-<name>.jpg` |
+| Состояние helpdesk | `state\helpdesk-state.json` (gitignored) |
+| Журнал событий | `state\timeline-YYYY-MM-DD.json` (без срока хранения) |
+| ffmpeg | через `FFMPEG_PATH` в `.env` (нужен для RTSP-снимков iPanda) |
+| Bitrix Диск | inbound webhook через `BITRIX_WEBHOOK_URL` |
+| Запуск вручную | `menu.ps1` (PowerShell UI) |
+| Запуск авто | Windows Task Scheduler: `AutoCamera Light` + `AutoCamera Daily` |
 
 ---
 
 ## Структура кода (`src/`)
 
-| Файл                  | Назначение                                         |
-|-----------------------|----------------------------------------------------|
-| `index.js`            | Основной оркестратор: читает systems.json, диспатчит по `type`, собирает результаты, запускает отчёт |
-| `reporter.js`         | Генерация HTML-отчёта заказчику + отдельные письма helpdesk по группам |
-| `logger.js`           | Логгер (файл + консоль, уровни info/warn/error/debug) |
-| `isapi.js`            | Hikvision/HiWatch ISAPI (digest auth, list каналов, статусы) |
-| `hikvision-multi.js`  | iVMS — пер-камерный ISAPI                           |
-| `trassir-check.js`    | TRASSIR SDK HTTP API (login, channels, signal, kbps)|
-| `rtsp-check.js`       | iPanda — RTSP DESCRIBE через NVR                   |
-| `beward-check.js`     | BEWARD — свежесть SMB-файлов + ping                |
-| `recordings-check.js` | Европласт Стройка — свежесть + качество SMB-чанков |
-| `smb-utils.js`        | Общие SMB-примитивы                                 |
-| `rostelecom-check.js` | Портал РТ через headless Playwright                |
-
-**Удалено в v1.0:** `analyzer.js` (polza.ai vision), `browser.js` (screenshot
-MCP), `ping-check.js` (iPanda ping — заменён на RTSP). В коде не должно
-оставаться упоминаний этих модулей или `POLZA_*` переменных.
+| Файл | Назначение |
+|---|---|
+| `index.js` | Главный оркестратор: `--light` или `--daily`, диспатч чекеров, snapshots, отчёты, email, helpdesk |
+| `reporter.js` | HTML-отчёт с миниатюрами (CID для email, file:// для live.html), `sendReport`, `sendHelpdeskReport`, `collectBrokenCameras` |
+| `logger.js` | Логгер (файл + консоль; уровни info/warn/error/debug) |
+| `isapi.js` | Hikvision/HiWatch ISAPI (digest auth) — статусы и `Streaming/channels/.../picture` для снимков |
+| `hikvision-multi.js` | iVMS — пер-камерный ISAPI |
+| `trassir-check.js` | TRASSIR SDK HTTP API (login, /channels, /screenshot) |
+| `rtsp-check.js` | iPanda — RTSP DESCRIBE через NVR |
+| `beward-check.js` | BEWARD — свежесть SMB-файлов |
+| `recordings-check.js` | Стройка — свежесть + контроль качества (битые 48-байт чанки) |
+| `smb-utils.js` | Общие SMB-примитивы (`ensureSmbSession`, `runPowershell`) |
+| `rostelecom-check.js` | Портал РТ — Playwright login + перехват API dashboard |
+| `snapshots.js` | **(v2)** Захват кадра по типу системы; Bitrix upload; Rostelecom — Playwright перехват thumbnails |
+| `bitrix-disk.js` | **(v2)** REST-клиент Bitrix24 Диска: upload / mkdir / publish / cleanup retention |
+| `last-good.js` | **(v2)** Кэш «последнего рабочего снимка» камеры (локально в `screenshots/last-good/`) |
+| `timeline.js` | **(v2)** Журнал событий offline/online за день + `summarizePeriod` для отчёта за период |
+| `state.js` | **(v2)** Helpdesk-state: `loadState` / `diffAndUpdate` / `saveState` |
+| `period-report.js` | **(v2)** CLI: `node src/period-report.js <fromYmd> <toYmd>` → HTML за диапазон |
+| `detect-device.js` | **(v2)** CLI: автоопределение типа устройства по IP, для мастера добавления |
+| `manage-cameras.mjs` | **(v2)** CLI для menu.ps1: list/gray/ungray/delete/add-system/add-cam/append-env |
+| `manage-gray.mjs` | Старый CLI grey-management, оставлен для совместимости |
 
 ---
 
 ## Поток выполнения
 
-1. **Startup** — читаем `.env` и `config/systems.json`, создаём папки
-   `logs/`, `reports/`.
-2. **Проверка систем** — по очереди для каждой `enabled: true` системы:
-   - диспатч по `sys.type` (trassir-sdk, ipanda-rtsp, hiwatch/hikvision,
-     smb-recordings, beward-smb, hikvision-multi, rt-portal);
-   - результат: `{ id, name, group, cameras: [...], error, aiSummary }`;
-   - ошибка одной системы не валит весь прогон — продолжаем дальше.
-3. **Отчёт** (`reporter.js`):
-   - HTML-письмо заказчику со сводкой, цветной легендой, таблицами/гридами
-     по каждой системе;
-   - **отдельные** письма helpdesk: одно на группу ("Европласт", "Онлайн").
-     Тема: `[HELPDESK] <группа> — проблемы камер DD.MM.YYYY (N шт.)`;
-   - helpdesk игнорирует камеры из `sys.helpdeskIgnore` и
-     `sys.unusedChannels`.
-4. **Письмо** — `nodemailer` через SMTP (Яндекс). Для анти-спама задаются
-   `Message-ID`, `text/plain` alternative, заголовок `X-Mailer`. При 550
-   SPAM — логируем и сохраняем отчёт локально.
-5. **Завершение** — `RUN_END | duration=… | systems=N | issues=N`, `exit 0/1`.
+### Light-режим (`node src/index.js --light`)
+1. Чекеры всех систем (как обычно).
+2. `state/timeline-<сегодня>.json` обновляется новыми событиями offline/online.
+3. `reports/live.html` перезаписывается со свежими статусами и миниатюрами из
+   `screenshots/last-good/` (если есть).
+4. **БЕЗ** снимков с камер, **БЕЗ** email, **БЕЗ** helpdesk.
+
+### Daily-режим (`node src/index.js --daily`)
+1. Чекеры всех систем.
+2. Timeline обновляется как в light.
+3. **Снимки всех камер** (online + offline) через `captureAll` →
+   `screenshots/<runId>/...`.
+4. Загрузка снимков в Bitrix Disk (`/AutoCamera/<группа>/<объект>/<YYYY-MM-DD>/`)
+   с retention-чисткой папок старше `SNAPSHOT_RETENTION_DAYS`.
+5. Обновление `screenshots/last-good/` для тех камер, у которых `online=true`
+   (битые placeholder'ы из NVR в кэш не попадают).
+6. HTML-отчёты: 1 полный (`reports/report-...-full.html`), 1 live, 2 по группам
+   (Европласт, Онлайн). Email-отчёты с CID-картинками вложением.
+7. **Helpdesk-дедупликация**: текущее множество broken сравнивается со
+   `state/helpdesk-state.json`. Письмо уходит только при наличии новых/восстановленных камер.
+
+### Ручной режим (`node src/index.js` без флагов)
+- Эквивалентно `--daily`, но без записи в `runMode='daily'` — для совместимости
+  со старыми вызовами из меню.
 
 ---
 
-## Семантика статусов
+## Семантика статусов в отчёте
 
-| Значение `online` | Отображение      | Смысл                                      |
-|-------------------|------------------|--------------------------------------------|
-| `true`            | зелёный квадрат  | камера в сети, проверка прошла успешно     |
-| `false`           | красный квадрат  | камера недоступна / API вернул ошибку      |
-| `null`            | серый квадрат    | "не используется" / нет данных (из конфига)|
-| `'unknown'`       | серый квадрат    | проверка не смогла дать достоверный ответ  |
+| `online` | Бейдж | Миниатюра | Смысл |
+|---|---|---|---|
+| `true` | зелёный | свежая / last-good | Камера в сети |
+| `false` | красный | last-good (если есть) или «нет снимка» | Не передаёт видео |
+| `true` + `recording=false` | оранжевый + ⚠ | свежая | Картинка есть, записи нет |
+| `unused` (по конфигу) | серый, верх — пустой серый блок | — | Канал не используется |
+| `null` (нет данных) | серый | — | Чекер не смог дать достоверный ответ |
 
-В письме заказчика блок с цветной легендой размещён между системами и
-футером — объясняет значение квадратов и суммарных бейджей `N/N online`.
+**Серые камеры** определяются:
+- TRASSIR — `knownOffline: [<displayName>, ...]` в `systems.json`
+- Остальные — `unusedChannels: [<1-based-ch-id>, ...]` в `systems.json`
 
----
-
-## Проверка качества SMB-записей (Стройка)
-
-Чекер `recordings-check.js` (`type: smb-recordings`) ловит не только
-«запись не пишется», но и «запись битая» — обрыв RTSP в середине чанка
-оставляет на шаре mp4-файл размером 48 байт (только заголовок без
-видеоданных). Раньше такие файлы засчитывались как нормальная запись —
-v1.0.1 это исправляет.
-
-Алгоритм:
-1. PowerShell забирает **последние N файлов** канала (по умолчанию 20)
-   с `name`, `size`, `ageMin`.
-2. Состояние канала (приоритет сверху вниз):
-   - **нет файлов** → offline
-   - **самый свежий старше `freshnessMin`** → offline,
-     `notes: "устарело: 18.7 ч назад (15/20 битых)"` —
-     показывает не только что канал лежит, но и качество последних файлов;
-   - **свежий, но `< minFileSizeKb`** → `online: true, recording: false`,
-     `notes: "последний файл битый (0 КБ при норме от 100 КБ); 19/20 битых"`
-   - **свежий и нормальный, но > `maxBadRatio` битых из последних** →
-     `online: true, recording: false`,
-     `notes: "качество записи плохое: 7/20 битых (35%); последний 250 КБ свежий"`
-   - всё хорошо → `online: true, recording: true`,
-     `notes: "последний чанк X мин назад (Y МБ); битых 0/20"`
-
-**Параметры** (опционально через блок `qualityCheck` в системе `systems.json`):
-
-| Поле           | Дефолт | Что делает                                          |
-|----------------|--------|-----------------------------------------------------|
-| `sampleSize`   | 20     | Сколько последних файлов брать на канал             |
-| `minFileSizeKb`| 100    | Файл меньшего размера → битый                        |
-| `maxBadRatio`  | 0.30   | > этой доли битых из выборки → канал не пишется ок  |
-
-Калибровка дефолтов: на проде Стройки нормальные mp4-чанки 250 КБ — 2.6 МБ,
-битые 48 байт. Порог 100 КБ их разделяет с большим запасом.
-
-Сломанная запись попадает в helpdesk-письмо как «нет записи» — стандартным
-образом, без отдельных правил.
+Изменяется через меню → `G` (Управление камерами).
 
 ---
 
-## Правила для helpdesk-писем
+## Helpdesk-логика
 
-- Пишем **по одному письму на группу**. Группа берётся из поля `group`
-  конкретной системы (`"Европласт"` / `"Онлайн"`).
-- Если в группе нет проблемных камер — письмо по ней не отправляется.
-- Камеры, занесённые в `helpdeskIgnore` / `unusedChannels` своей системы,
-  в helpdesk-письма не попадают.
-- Для BEWARD "мерцание" (файлы появляются с паузами) — норма; в helpdesk
-  попадают только длительно offline камеры (по freshness ≥ 180 мин).
+- Письмо уходит **только при изменениях** (новые broken или восстановленные).
+  Если те же N камер сломаны второй прогон подряд — письмо НЕ повторяется.
+- Сравнение через `state/helpdesk-state.json` (ключ: `<sysId>|<camera name>`).
+- Группа определяется полем `group` каждой системы (`"Европласт"` / `"Онлайн"`),
+  отдельное письмо на каждую группу.
+- Камеры из `helpdeskIgnore` / `unusedChannels` / TRASSIR-`knownOffline` не
+  попадают в helpdesk.
+- Сброс helpdesk-state — `node src/index.js --reset-state` или из меню.
+
+---
+
+## Меню (menu.ps1) — все пункты
+
+```
+=== Проверки ===
+ 1   Проверить ВСЕ системы (full daily)
+ T   Тестовая проверка ВСЕХ (dry-run)
+ 2-10 Отдельная система: Производство, Офис, Склад, Новый цех, Стройка,
+      Цех выдува, BEWARD, iVMS, Ростелеком
+
+=== Просмотр ===
+ R   Открыть последний отчёт
+ V   Открыть live-monitor (reports/live.html)
+ H   Отчёт за период (1=сегодня, 2=3 дн, 3=7 дн, 4=30 дн, 5=вручную)
+ L   Открыть папку логов
+
+=== Настройка ===
+ S   Настроить расписание (Light interval + Daily time)
+ E   Email-адреса (Европласт / Онлайн / Helpdesk / fallback)
+ G   Управление камерами:
+       список систем → выбор → выбор камеры → меню (gray/active/delete)
+       A — Добавить новое устройство (мастер с detect-device)
+
+ 0   Выход
+```
 
 ---
 
 ## Переменные окружения
 
-Полный список — в `.env.example`. Кратко:
+| Группа | Ключи | Назначение |
+|---|---|---|
+| **SMTP** | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS` | Отправка писем (Yandex PDD `dc1c.ru`) |
+| **Получатели** | `REPORT_TO_EVROPLAST`, `REPORT_TO_ONLINE`, `REPORT_TO`, `HELPDESK_TO` | Адресаты отчётов и helpdesk |
+| **TRASSIR** | `TRASSIR_USER`, `TRASSIR_PASS` | SDK login |
+| **HiWatch** | `HIWATCH_SKLAD_URL/USER/PASS`, `HIWATCH_VYDUV_URL/USER/PASS` | NVR login |
+| **iPanda** | `IPANDA_OFFICE_*`, `IPANDA_CEH_*` | NVR кредосы (RTSP) |
+| **iVMS** | `IVMS_AERO_*`, `IVMS_T2_*`, `IVMS_MEGAFON_*` | Per-camera Hikvision |
+| **BEWARD** | `BEWARD_SMB_USER`, `BEWARD_SMB_PASS` | SMB |
+| **Стройка** | `STROYKA_SMB_USER`, `STROYKA_SMB_PASS` | SMB |
+| **Ростелеком** | `RT_PORTAL_URL`, `RT_PORTAL_USER`, `RT_PORTAL_PASS` | Портал |
+| **Bitrix (v2)** | `BITRIX_WEBHOOK_URL`, `BITRIX_ROOT_FOLDER_ID`, `BITRIX_STORAGE_ID` | Загрузка снимков |
+| **Системные (v2)** | `FFMPEG_PATH`, `SNAPSHOT_RETENTION_DAYS` | ffmpeg для RTSP-снимков, retention папок в Bitrix |
+| **Тестирование** | `TEST_MODE=true` | Принудительно перенаправляет письма (TEST-режим, на проде НЕ задавать) |
 
-- `SMTP_*`, `REPORT_TO`, `HELPDESK_TO` — почта.
-- `TRASSIR_USER/PASS`.
-- `HIWATCH_SKLAD_*`, `HIWATCH_VYDUV_*`.
-- `STROYKA_SMB_USER/PASS`, `BEWARD_SMB_USER/PASS`.
-- `IVMS_AERO_*`, `IVMS_T2_*`, `IVMS_MEGAFON_*`.
-- `RT_PORTAL_URL/USER/PASS`.
+---
 
-**Больше не используются** (удалены из кода): `POLZA_API_KEY`,
-`POLZA_MODEL`, `REPORT_FROM`, `NOVIY_CEH_*`, `TRASSIR_URL`, `IVMS_URL`,
-`BEWARD_URL`.
+## Стройка — контроль качества SMB-записей
+
+Чекер `recordings-check.js` (`type: smb-recordings`) ловит как «запись не пишется»,
+так и «запись битая» — обрыв RTSP оставляет на шаре mp4-файл 48 байт.
+
+Текущий путь: `\\10.0.120.4\Video\{9,11,13}` (3 канала, обновлено в мае 2026).
+
+Параметры (опционально в `qualityCheck` блоке системы):
+
+| Поле | Дефолт | Что делает |
+|---|---|---|
+| `sampleSize` | 20 | Сколько последних файлов брать |
+| `minFileSizeKb` | 100 | Меньше — битый |
+| `maxBadRatio` | 0.30 | > этой доли битых из выборки → канал плохой |
+| `freshnessMin` | 60 | Свежесть последнего файла (минут) |
 
 ---
 
 ## Правила поведения агента
 
 - **Не** запрашивать интерактивный ввод.
-- **Не** зависать: у каждого сетевого вызова должен быть таймаут.
-- Ошибка одной камеры / системы — залогировать и продолжить.
+- **Не** зависать: у каждого сетевого вызова — таймаут.
+- Ошибка одной камеры/системы — залогировать и продолжить.
 - Критический сбой SMTP — сохранить отчёт локально, `exit 1`.
-- Комментарии и сообщения логов — на русском.
+- Комментарии и логи — на русском.
 - Никогда не ломать обратную совместимость полей результата (`cameras[i].online`,
   `recording`, `audio`, `notes`, `index`) — их читает `reporter.js`.
+- `snapMap`-значения для миниатюр поддерживают два режима: `cid:` для email и
+  относительный путь для file://. `index.js → buildSnapMap` собирает оба.
 
 ---
 
-## Актуальная версия
+## Версионность
 
-**v1.0.1** — зафиксирована в `menu.ps1` (`$Version = "v1.0.1"`) и
-отображается в шапке меню. При значимых изменениях поведения/набора
-систем — бамп версии и обновление этого файла.
+- **v2.0** (май 2026) — описано выше. Финальный архив v2-dev истории: ветка
+  `v2-dev` в `git@github.com:alegis1337/autocamera.git`.
+- **v1.0.1** (апрель 2026) — фикс детектирования битых mp4 на Стройке.
+- **v1.0** (март 2026) — первый прод-релиз: 9 систем, отчёты по группам,
+  helpdesk, планировщик, серый маркер камер.
 
-### История версий
-
-- **v1.0** — первый прод-релиз: 9 систем, отчёты по группам, helpdesk,
-  планировщик, серый маркер камер.
-- **v1.0.1** — фикс детектирования битых записей на Стройке:
-  `recordings-check.js` теперь смотрит размер последних 20 файлов и
-  помечает канал как «нет записи», если последний чанк подозрительно
-  маленький (обрыв RTSP) или > 30% последних файлов битые.
+История версий хранится в ветках git: `main` (актуальное), `v2-dev` (архив),
+`feature-diagnose` (отложенная активная автодиагностика).

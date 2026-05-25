@@ -1,10 +1,16 @@
 node_modules/
 .env
+.env.bak
 
 # Runtime data
-screenshots/*.png
+screenshots/
+!screenshots/.gitkeep
 reports/*.html
 logs/*.log
+
+# v2: state (helpdesk-state + дневные timeline-*.json — динамика, не в git)
+state/
+!state/.gitkeep
 
 # OS
 Thumbs.db

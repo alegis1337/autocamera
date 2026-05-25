@@ -123,15 +123,15 @@
     "displayMode": "grid",
     "gridColumns": 3,
     "host": "10.0.120.4",
-    "shareName": "video",
-    "basePath": "video",
+    "shareName": "Video",
+    "basePath": "",
     "smbUserEnv": "STROYKA_SMB_USER",
     "smbPassEnv": "STROYKA_SMB_PASS",
     "freshnessMin": 60,
     "channels": [
-      { "index": 0, "name": "Канал 5",  "folder": "5"  },
-      { "index": 1, "name": "Канал 9",  "folder": "9"  },
-      { "index": 2, "name": "Канал 11", "folder": "11" }
+      { "index": 0, "name": "Канал 9",  "folder": "9"  },
+      { "index": 1, "name": "Канал 11", "folder": "11" },
+      { "index": 2, "name": "Канал 13", "folder": "13" }
     ]
   },
   {

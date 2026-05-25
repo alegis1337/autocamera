@@ -1,7 +1,7 @@
 {
   "name": "autocamera",
-  "version": "1.0.1",
-  "description": "Automated camera monitoring across 9 systems with per-group reports, helpdesk emails, and SMB recording quality check",
+  "version": "1.0.0",
+  "description": "Automated camera monitoring — Playwright + polza.ai vision",
   "type": "module",
   "scripts": {
     "start": "node src/index.js",

@@ -166,6 +166,12 @@ export async function checkHikvisionMultiSystem(sys) {
     results.push({
       index: cam.index,
       name:  cam.name,
+      // Сохраняем host/port + ENV-имена кредсов из config (нужны для съёма
+      // snapshot'а на v2 — snapshots.js берёт user/pass из process.env по ним)
+      host:    cam.host,
+      port:    cam.port,
+      userEnv: cam.userEnv,
+      passEnv: cam.passEnv,
       online: r.online,
       recording: r.recording,
       recordingFresh: r.recordingFresh,
