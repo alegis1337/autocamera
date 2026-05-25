@@ -2,14 +2,14 @@ node_modules/
 .env
 
 # Runtime data
-screenshots/*.png
-screenshots/*.jpg
+screenshots/
+!screenshots/.gitkeep
 reports/*.html
 logs/*.log
 
-# v2: helpdesk-state (содержит инфу о камерах, локально)
-state/helpdesk-state.json
-state/*.tmp
+# v2: state (helpdesk-state + дневные timeline-*.json — динамика, не в git)
+state/
+!state/.gitkeep
 
 # OS
 Thumbs.db

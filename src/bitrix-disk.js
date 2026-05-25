@@ -251,6 +251,22 @@ export async function getExternalLink(fileId) {
 }
 
 /**
+ * Возвращает внутренний URL папки в Битрикс24-диске (DETAIL_URL).
+ * Это «web-ссылка», по которой залогиненный в портале сотрудник попадает
+ * прямо в папку (галерея со всеми скриншотами). Публичной её сделать нельзя
+ * (Bitrix не даёт getExternalLink для папок) — но заказчик у нас работает
+ * в B24 и обычно уже залогинен, поэтому этого хватает.
+ */
+export async function getFolderUrl(folderId) {
+  try {
+    const folder = await callBitrix('disk.folder.get', { id: folderId });
+    return folder?.DETAIL_URL || folder?.LINK || '';
+  } catch {
+    return '';
+  }
+}
+
+/**
  * Удаляет файл/папку (помечает как удалённый, в корзину).
  */
 export async function deleteResource(id, isFolder = false) {

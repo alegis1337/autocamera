@@ -2,7 +2,12 @@
  * AutoCamera Monitor — Main Pipeline
  *
  * Usage:
- *   node src/index.js                             — полный запуск
+ *   node src/index.js                             — полный запуск (ручной, как раньше)
+ *   node src/index.js --light                     — лёгкий прогон: чекеры + timeline + live.html.
+ *                                                   БЕЗ снимков, email, helpdesk. Для расписания
+ *                                                   каждые 15 мин.
+ *   node src/index.js --daily                     — конец дня: чекеры + снимки (online+offline)
+ *                                                   + email с историей за день + helpdesk.
  *   node src/index.js --dry-run                   — без отправки email
  *   node src/index.js --test-email                — тестовый email
  *   node src/index.js --dry-run --only noviy-ceh  — только одна система
@@ -13,9 +18,12 @@
  * v2 features:
  *   • helpdesk-state в state/helpdesk-state.json — заявки уходят только
  *     при смене статуса (active↔broken). См. src/state.js.
- *   • Snapshots → Битрикс Диск — кадры online-камер заливаются в Битрикс
- *     с публичными ссылками. См. src/snapshots.js + src/bitrix-disk.js.
- *   • Live-монитор reports/live.html — auto-refresh 30 сек.
+ *   • Snapshots → Битрикс Диск — кадры заливаются в Битрикс с публичными
+ *     ссылками. См. src/snapshots.js + src/bitrix-disk.js.
+ *   • Live-монитор reports/live.html — auto-refresh 30 сек (обновляется
+ *     каждым light-прогоном).
+ *   • Timeline state/timeline-YYYY-MM-DD.json — журнал событий offline/online
+ *     за день. Light-прогоны его наполняют, daily-прогон рисует историю.
  */
 
 import fs from 'fs';
@@ -31,8 +39,10 @@ import { checkRecordingsSystem } from './recordings-check.js';
 import { checkHikvisionMultiSystem } from './hikvision-multi.js';
 import { checkRostelecomSystem } from './rostelecom-check.js';
 import { loadState, saveState, resetState, diffAndUpdate } from './state.js';
+import { loadTodayTimeline, saveTimeline, diffAndAppend, summarize } from './timeline.js';
 import { captureAll, cleanupRun } from './snapshots.js';
 import { uploadFreshSnapshot, cleanupOlderThan } from './bitrix-disk.js';
+import * as lastGood from './last-good.js';
 
 // ─── Load .env ────────────────────────────────────────────────────────────────
 const dotenvPath = path.resolve('.env');
@@ -43,15 +53,25 @@ if (fs.existsSync(dotenvPath)) {
 
 // ─── CLI flags ────────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
-const isDryRun     = args.includes('--dry-run');
-const isTestEmail  = args.includes('--test-email');
-const isDebug      = args.includes('--debug');
-const isResetState = args.includes('--reset-state');
+const isDryRun      = args.includes('--dry-run');
+const isTestEmail   = args.includes('--test-email');
+const isDebug       = args.includes('--debug');
+const isResetState  = args.includes('--reset-state');
 const isNoSnapshots = args.includes('--no-snapshots');
-const onlyId       = (() => {
+const isLight       = args.includes('--light');
+const isDaily       = args.includes('--daily');
+const onlyId        = (() => {
   const idx = args.indexOf('--only');
   return idx >= 0 ? args[idx + 1] : null;
 })();
+
+if (isLight && isDaily) {
+  console.error('Нельзя задать одновременно --light и --daily');
+  process.exit(2);
+}
+
+// runMode — для логирования и ветвлений ниже.
+const runMode = isLight ? 'light' : (isDaily ? 'daily' : 'manual');
 
 if (isDebug) log.setLogLevel('DEBUG');
 
@@ -100,6 +120,58 @@ const systemsConfig = JSON.parse(
 fs.mkdirSync(path.join(ROOT, 'reports'), { recursive: true });
 fs.mkdirSync(path.join(ROOT, 'logs'),    { recursive: true });
 
+// ─── snapMap helper ───────────────────────────────────────────────────────────
+// Собирает для каждого результата камеры путь к её «текущей» картинке.
+// Mode:
+//   'cid'  → src = "cid:..." и в cidList — { cid, path } для inline-attachments
+//            писем (там file:// не работает).
+//   'file' → src = относительный путь от reports/*.html для локального
+//            просмотра в браузере.
+// Источники картинок:
+//   1. captureMap (сделанный только что свежий кадр) — приоритет, если есть.
+//   2. last-good кэш — фолбэк для офлайн или вообще не снятых камер.
+function buildSnapMap(systemResults, captureMap, mode) {
+  const snapMap = new Map();
+  const cidList = [];
+  const cidSeen = new Set();
+
+  for (const sys of systemResults) {
+    for (const cam of sys.cameras || []) {
+      const key = `${sys.id}|${cam.index}`;
+
+      // 1. Попытка взять свежий кадр из captureMap
+      let chosen = null;
+      const fresh = captureMap?.get(key);
+      if (fresh && fs.existsSync(fresh)) {
+        chosen = { path: fresh, fresh: true, ageMs: 0 };
+      } else {
+        // 2. last-good кэш
+        const meta = lastGood.getMeta(sys.id, cam.index, cam.name);
+        if (meta) chosen = { path: meta.path, fresh: false, ageMs: meta.ageMs };
+      }
+      if (!chosen) continue;
+
+      if (mode === 'cid') {
+        const cid = `cam-${sys.id.replace(/[^a-z0-9]+/gi, '_')}-${cam.index ?? 0}@autocamera`;
+        if (!cidSeen.has(cid)) {
+          cidList.push({ cid, path: chosen.path });
+          cidSeen.add(cid);
+        }
+        snapMap.set(key, { src: `cid:${cid}`, fresh: chosen.fresh, ageMs: chosen.ageMs });
+      } else {
+        // file mode: относительный путь от reports/<file>.html.
+        // reports/ и screenshots/ лежат рядом → ../screenshots/last-good/...
+        const rel = path
+          .relative(path.join(ROOT, 'reports'), chosen.path)
+          .replace(/\\/g, '/');
+        snapMap.set(key, { src: rel, fresh: chosen.fresh, ageMs: chosen.ageMs });
+      }
+    }
+  }
+
+  return { snapMap, cidList };
+}
+
 // ─── Test email mode ──────────────────────────────────────────────────────────
 if (isTestEmail) {
   log.info('test', 'Режим тестового email');
@@ -122,10 +194,11 @@ if (isTestEmail) {
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 const startTime = Date.now();
-log.section('AutoCamera Monitor — запуск');
+log.section(`AutoCamera Monitor — запуск [${runMode}]`);
 log.info('startup', 'Конфигурация загружена', {
   systems: systemsConfig.length,
-  mode: isDryRun ? 'dry-run' : 'full',
+  runMode,
+  dryRun: isDryRun,
   only: onlyId || 'all',
 });
 
@@ -347,12 +420,67 @@ for (let i = 0; i < systems.length; i++) {
   systemResults.push(result);
 }
 
+// ─── Timeline (light/daily): обновляем журнал событий за день ─────────────────
+// Делается ДО snapshots/email/helpdesk, чтобы в любом режиме (включая ручной
+// прогон) timeline всегда отражал актуальное состояние.
+const timeline = loadTodayTimeline();
+const newEvents = diffAndAppend(timeline, systemResults, new Date(startTime));
+saveTimeline(timeline);
+if (newEvents.length > 0) {
+  log.info('timeline', `Зафиксировано событий: ${newEvents.length}`);
+  for (const ev of newEvents) {
+    const downStr = ev.event === 'online' && ev.downtimeMin != null
+      ? ` (простой ${ev.downtimeMin} мин)` : '';
+    log.info('timeline', `  [${ev.ts}] ${ev.system} / ${ev.camera}: ${ev.event}${downStr}`);
+  }
+} else {
+  log.info('timeline', 'Новых событий нет — статусы стабильны');
+}
+
+// Timeline-файлы НЕ чистим: храним без ограничения срока, чтобы можно было
+// сделать «отчёт за период» через menu.ps1 → H за любую дату назад.
+
+// ─── LIGHT-режим: на этом всё заканчивается ───────────────────────────────────
+// Light-прогоны (раз в 15 мин) — только чекеры + timeline + live.html.
+// БЕЗ снимков, БЕЗ email, БЕЗ helpdesk — те идут в --daily.
+if (isLight) {
+  log.section('Light-прогон: обновление live.html');
+  const durationMs = Date.now() - startTime;
+  const timelineSummary = summarize(timeline, new Date());
+  const liveReportPath = path.join(ROOT, 'reports', 'live.html');
+  // Light не снимает кадров — берём только из last-good. mode='file' для file://
+  const { snapMap: liveSnapMap } = buildSnapMap(systemResults, null, 'file');
+  buildReport({
+    systemResults,
+    runMeta:    { startTime, durationMs, runMode: 'light', timeline, timelineSummary },
+    outputPath: liveReportPath,
+    liveMode:   true,
+    snapMap:    liveSnapMap,
+  });
+  log.info('report', 'Live-монитор обновлён', { path: liveReportPath });
+
+  const totalSec = Math.round(durationMs / 1000);
+  log.section('Готово (light)');
+  log.info('done', 'Light-прогон завершён', {
+    duration: `${totalSec}s`,
+    systems:  systemResults.length,
+    events:   newEvents.length,
+    incidents: timelineSummary.length,
+  });
+  process.exit(0);
+}
+
 // ─── Snapshots → Битрикс Диск (v2) ────────────────────────────────────────────
-// Захватываем кадры с онлайн-камер, грузим в Битрикс Диск, в cam.snapshotUrl
+// Захватываем кадры с камер, грузим в Битрикс Диск, в cam.snapshotUrl
 // сохраняем публичную ссылку. Без BITRIX_WEBHOOK_URL — фича пропускается.
+//
+// В daily-режиме пробуем и offline-камеры (TRASSIR/Hikvision/RT часто
+// отдают placeholder «no signal»). В manual-режиме поведение оставлено как было
+// (только online), чтобы ручной запуск был быстрее.
 const bxWebhook   = process.env.BITRIX_WEBHOOK_URL    || '';
 const bxRoot      = process.env.BITRIX_ROOT_FOLDER_ID || '';
 const bxRetention = parseInt(process.env.SNAPSHOT_RETENTION_DAYS || '30', 10);
+const includeOfflineSnaps = isDaily;       // только в daily — offline тоже
 
 if (!isNoSnapshots && bxWebhook && bxRoot) {
   // runId — служебный идентификатор папки локального временного хранилища.
@@ -370,10 +498,14 @@ if (!isNoSnapshots && bxWebhook && bxRoot) {
   // "00-201.jpg" → "201.jpg" (убираем числовой index-префикс)
   const cleanFileName = (filename) => filename.replace(/^\d+-/, '');
 
-  log.stepStart('snapshots', 'Захват кадров с камер');
+  log.stepStart('snapshots', 'Захват кадров с камер',
+    { includeOffline: includeOfflineSnaps });
   let captured = [];
   try {
-    captured = await captureAll(systemResults, runId, { concurrency: 5 });
+    captured = await captureAll(systemResults, runId, {
+      concurrency:    5,
+      includeOffline: includeOfflineSnaps,
+    });
   } catch (err) {
     log.stepEnd('snapshots', 'fail', 'captureAll упал', { error: err.message });
   }
@@ -430,7 +562,27 @@ if (!isNoSnapshots && bxWebhook && bxRoot) {
   log.stepEnd('bitrix-disk', uploadErrors === 0 ? 'ok' : 'warn',
     `Загружено: ${uploaded} ok, ${uploadErrors} с ошибкой`);
 
-  // Удаляем локальные временные файлы
+  // ── Обновляем last-good кэш ──────────────────────────────────────────────
+  // Для каждой камеры, у которой свежий кадр получен И камера была online —
+  // копируем локальный файл в screenshots/last-good/<sys>/<cam>.jpg.
+  // Эти картинки потом используются и в обычных отчётах (как миниатюры в
+  // гриде/блоке «Не работают»), и в live.html.
+  let lastGoodUpdated = 0;
+  for (const item of captured) {
+    if (!item.localPath) continue;
+    const sys = systemResults.find(s => s.id === item.sysId);
+    if (!sys) continue;
+    const cam = sys.cameras?.find(c => c.index === item.camIndex);
+    // Обновляем кэш только если камера была online на этом прогоне —
+    // иначе писали бы «placeholder no signal» в кэш и забивали бы им реальную картинку.
+    if (cam?.online !== true) continue;
+    if (lastGood.update(item.sysId, item.camIndex, item.camName, item.localPath)) {
+      lastGoodUpdated++;
+    }
+  }
+  log.info('last-good', `Кэш обновлён: ${lastGoodUpdated} картинок`);
+
+  // Локальные screenshots/<runId>/ — обычная очистка сразу после заливки.
   cleanupRun(runId);
 
   // Retention-чистка старых YYYY-MM-DD папок в Битриксе
@@ -455,8 +607,26 @@ if (!isNoSnapshots && bxWebhook && bxRoot) {
 log.section('Формирование отчётов');
 const durationMs = Date.now() - startTime;
 
+// История событий за день (для daily/manual прогона). В light до этой ветки
+// не дойдём — там уже был return выше.
+const timelineSummary = summarize(timeline, new Date());
+
+const runMeta = {
+  startTime, durationMs, runMode,
+  timeline,
+  timelineSummary,
+};
+
+// Готовим snapMap для отчётов. Для браузерных отчётов (full + live.html) —
+// относительные пути file://. Для email-отчётов — CID-вложения с inline-картинками.
+const { snapMap: fileSnapMap } = buildSnapMap(systemResults, null, 'file');
+const { snapMap: cidSnapMap, cidList } = buildSnapMap(systemResults, null, 'cid');
+log.info('snap-map', 'Картинок для отчёта', {
+  file: fileSnapMap.size, cid: cidSnapMap.size,
+});
+
 // Общий отчёт для браузера (все группы вместе)
-const fullReportPath = buildReport({ systemResults, runMeta: { startTime, durationMs } });
+const fullReportPath = buildReport({ systemResults, runMeta, snapMap: fileSnapMap });
 log.info('report', 'Полный HTML-отчёт сохранён', { path: fullReportPath });
 
 // Live-монитор (v2): тот же отчёт, но всегда по фиксированному пути с
@@ -464,9 +634,10 @@ log.info('report', 'Полный HTML-отчёт сохранён', { path: full
 const liveReportPath = path.join(ROOT, 'reports', 'live.html');
 buildReport({
   systemResults,
-  runMeta:    { startTime, durationMs },
+  runMeta,
   outputPath: liveReportPath,
   liveMode:   true,
+  snapMap:    fileSnapMap,
 });
 log.info('report', 'Live-монитор обновлён', { path: liveReportPath });
 
@@ -484,7 +655,7 @@ for (const group of REPORT_GROUPS) {
   totalIssues += groupIssues;
 
   const reportPath = buildReport({
-    systemResults, runMeta: { startTime, durationMs }, group,
+    systemResults, runMeta, group, snapMap: cidSnapMap,
   });
   log.info('report', `HTML-отчёт сохранён [${group}]`, { path: reportPath, issues: groupIssues });
   groupReports.push({ group, reportPath, issues: groupIssues });
@@ -509,6 +680,7 @@ if (!isDryRun) {
       await sendReport({
         reportPath, issueCount: issues, runTime: startTime,
         screenshotPaths: [], groupLabel: group,
+        inlineImages: cidList,    // ← CID-attachments для миниатюр в письме
       });
       log.stepEnd('email', 'ok', `Email отправлен [${group}]`);
     } catch (err) {
@@ -547,7 +719,7 @@ if (!isDryRun) {
       await sendHelpdeskReport({
         newlyBroken: diff.newlyBroken,
         recovered:   diff.recovered,
-        runMeta:     { startTime, durationMs },
+        runMeta,
       });
       log.stepEnd('helpdesk', 'ok',
         `Helpdesk-письмо отправлено (${diff.newlyBroken.length} новых, ${diff.recovered.length} восстановл.)`);
@@ -584,8 +756,8 @@ log.cleanOldLogs(14);
 
 // ─── Итог ─────────────────────────────────────────────────────────────────────
 const totalSec = Math.round((Date.now() - startTime) / 1000);
-log.section('Готово');
-log.info('done', 'Запуск завершён', {
+log.section(`Готово (${runMode})`);
+log.info('done', `Запуск завершён [${runMode}]`, {
   duration: `${totalSec}s`,
   systems: systemResults.length,
   issues: issueCount,

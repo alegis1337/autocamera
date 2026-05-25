@@ -119,12 +119,14 @@ async function snapRtsp(sys, cam, localPath) {
 
   // В ffmpeg 8 убрали -stimeout / -rw_timeout как глобальные опции —
   // ограничиваемся жёстким timeout от execFile (15с).
+  // -q:v 2 — высокое качество JPEG (1=best, 31=worst). При q=5 миниатюры
+  //          выглядели заметно мыльно при увеличении — q=2 даёт чёткую картинку.
   const args = [
     '-rtsp_transport', 'tcp',
     '-y',
     '-i', rtspUrl,
     '-frames:v', '1',
-    '-q:v', '5',
+    '-q:v', '2',
     '-loglevel', 'error',
     localPath,
   ];
@@ -220,15 +222,8 @@ async function snapTrassir(sys, cam) {
  */
 const rostelecomBatchCache = new Map();  // sys.id → Promise<Map<uid, Buffer>>
 
-async function fetchRostelecomBatch(sys) {
-  // Lazy-import чтобы не платить за Playwright когда RT нет в прогоне
+async function fetchRostelecomBatchOnce(sys, portalUrl, user, pass) {
   const { chromium } = await import('playwright');
-
-  const portalUrl = process.env[sys.portalUrlEnv] || sys.portalUrl || 'https://lk-b2b.camera.rt.ru';
-  const user      = process.env[sys.userEnv]      || sys.user || '';
-  const pass      = process.env[sys.passEnv]      || sys.pass || '';
-  if (!user || !pass) throw new Error('нет учётки RT_PORTAL_USER/PASS');
-
   const browser = await chromium.launch({ headless: true });
   try {
     const ctx = await browser.newContext({
@@ -251,13 +246,21 @@ async function fetchRostelecomBatch(sys) {
       } catch { /* пропускаем */ }
     });
 
-    // Login flow (тот же что в rostelecom-check.js)
+    // Login flow (зеркалит rostelecom-check.js с увеличенными таймаутами).
+    // Прошлая версия с timeout=20с на waitForSelector регулярно фейлилась —
+    // passport.rt.ru рендерится React-формой ~10-20 сек.
     await page.goto(`${portalUrl}/main/cameras`, {
-      waitUntil: 'domcontentloaded', timeout: 40_000,
+      waitUntil: 'domcontentloaded', timeout: 60_000,
     }).catch(() => {});
-    await page.waitForURL('**/passport.rt.ru/**', { timeout: 30_000 }).catch(() => {});
+
+    await page.waitForURL('**/passport.rt.ru/**', { timeout: 60_000 }).catch(() => {});
+
+    // Сначала ждём load (React успеет смонтировать форму)
+    await page.waitForLoadState('load', { timeout: 30_000 }).catch(() => {});
+
+    // Потом ищем поле логина — много времени, чтобы пережить медленный рендер
     await page.waitForSelector('input#username, input[type="text"]', {
-      state: 'attached', timeout: 20_000,
+      state: 'attached', timeout: 45_000,
     });
     await page.waitForTimeout(2000);
 
@@ -278,25 +281,62 @@ async function fetchRostelecomBatch(sys) {
       if (b) b.click(); else document.querySelector('form')?.submit();
     }, { u: user, p: pass });
 
-    // Ждём возврат на портал
-    for (let i = 0; i < 30; i++) {
+    // Ждём возврат на портал (до 60 сек)
+    let returned = false;
+    for (let i = 0; i < 60; i++) {
       await page.waitForTimeout(1000);
       const u = page.url();
-      if (u.includes('camera.rt.ru') && !u.includes('passport')) break;
+      if (u.includes('camera.rt.ru') && !u.includes('passport')) {
+        returned = true;
+        break;
+      }
+    }
+    if (!returned) {
+      throw new Error('не вернулись на портал после логина');
     }
 
     // Дать порталу время подгрузить все thumbnails. Ждём пока соберём
-    // ожидаемое число камер (sys.cameras.length) или максимум 30 сек.
+    // ожидаемое число камер (sys.cameras.length) или максимум 60 сек.
     const expect = sys.cameras?.length || 8;
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 60; i++) {
       await page.waitForTimeout(1000);
       if (buffers.size >= expect) break;
     }
 
+    if (buffers.size === 0) {
+      throw new Error('портал не отдал ни одной миниатюры');
+    }
     return buffers;
   } finally {
     await browser.close().catch(() => {});
   }
+}
+
+async function fetchRostelecomBatch(sys) {
+  const portalUrl = process.env[sys.portalUrlEnv] || sys.portalUrl || 'https://lk-b2b.camera.rt.ru';
+  const user      = process.env[sys.userEnv]      || sys.user || '';
+  const pass      = process.env[sys.passEnv]      || sys.pass || '';
+  if (!user || !pass) throw new Error('нет учётки RT_PORTAL_USER/PASS');
+
+  const maxAttempts = 3;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const buffers = await fetchRostelecomBatchOnce(sys, portalUrl, user, pass);
+      if (attempt > 1) {
+        log.info('snapshot', `RT batch: получено с попытки ${attempt}/${maxAttempts}`);
+      }
+      return buffers;
+    } catch (err) {
+      lastErr = err;
+      log.warn('snapshot', `RT batch попытка ${attempt}/${maxAttempts}: ${err.message}`);
+      if (attempt < maxAttempts) {
+        // Пауза между попытками — даём порталу «отдохнуть»
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 async function snapRostelecom(sys, cam) {
@@ -407,16 +447,23 @@ export async function captureSnapshot(runId, sys, cam) {
  * @param {Array}  systemResults
  * @param {string} runId
  * @param {object} options
- * @param {number} options.concurrency — default 5
+ * @param {number} options.concurrency    — default 5
+ * @param {boolean} options.includeOffline — пробовать снимать offline-камеры
+ *   тоже (для daily-режима). У TRASSIR/Hikvision NVR при offline-канале
+ *   часто возвращается «no signal» placeholder — полезно как доказательство
+ *   в отчёте. У Rostelecom — портал тоже отдаёт placeholder через CDN, его
+ *   batch перехватит. У RTSP-камер обычно просто timeout — ну и ладно.
  * @returns {Promise<Array<{sysId, camIndex, camName, localPath, error}>>}
  */
 export async function captureAll(systemResults, runId, options = {}) {
-  const concurrency = options.concurrency || 5;
+  const concurrency    = options.concurrency || 5;
+  const includeOffline = options.includeOffline === true;
   const targets = [];
   for (const sys of systemResults) {
     if (sys.error) continue;
     for (const cam of sys.cameras) {
-      if (cam.online !== true) continue;       // оффлайн — снимать нечего
+      if (!includeOffline && cam.online !== true) continue;       // light: только online
+      if (includeOffline && cam.online == null) continue;         // unknown — всё равно нечего
       const unused = sys.unusedChannels || [];
       const ch = cam.id != null ? cam.id : (cam.index ?? 0) + 1;
       if (unused.includes(ch)) continue;
@@ -424,7 +471,7 @@ export async function captureAll(systemResults, runId, options = {}) {
     }
   }
 
-  log.info('snapshot', `Готовлю снимки`, { count: targets.length, concurrency });
+  log.info('snapshot', `Готовлю снимки`, { count: targets.length, concurrency, includeOffline });
 
   const out = [];
   let cursor = 0;
@@ -438,9 +485,9 @@ export async function captureAll(systemResults, runId, options = {}) {
           log.warn('snapshot', `${sys.id}/${cam.name}: ${r.error}`);
         }
         out[idx] = {
-          sysId: sys.id,
-          camIndex: cam.index,
-          camName: cam.name,
+          sysId:     sys.id,
+          camIndex:  cam.index,
+          camName:   cam.name,
           localPath: r.ok ? r.localPath : null,
           error:     r.ok ? null         : r.error,
         };
