@@ -38,6 +38,7 @@ import { checkBewardSystem } from './beward-check.js';
 import { checkRecordingsSystem } from './recordings-check.js';
 import { checkHikvisionMultiSystem } from './hikvision-multi.js';
 import { checkRostelecomSystem } from './rostelecom-check.js';
+import { checkTplinkTapoSystem } from './tplink-tapo-check.js';
 import { loadState, saveState, resetState, diffAndUpdate } from './state.js';
 import { loadTodayTimeline, saveTimeline, diffAndAppend, summarize } from './timeline.js';
 import { captureAll, cleanupRun } from './snapshots.js';
@@ -230,7 +231,7 @@ for (let i = 0; i < systems.length; i++) {
     pass:            process.env[sys.passEnv]  || '',
   };
 
-  if (!creds.url && !['ipanda-rtsp', 'trassir-sdk', 'beward-smb', 'smb-recordings', 'hikvision-multi', 'rt-portal'].includes(sys.type)) {
+  if (!creds.url && !['ipanda-rtsp', 'trassir-sdk', 'beward-smb', 'smb-recordings', 'hikvision-multi', 'rt-portal', 'tplink-tapo'].includes(sys.type)) {
     log.warn(sys.id, 'Пропуск — URL не настроен в .env', { envVar: sys.urlEnv });
     systemResults.push({
       ...sys, cameras: [], screenshotPath: null,
@@ -278,6 +279,37 @@ for (let i = 0; i < systems.length; i++) {
       const online = isapiCams.filter(c => c.online === true).length;
       const offline = isapiCams.filter(c => c.online === false).length;
       result.aiSummary = `ISAPI: ${online} online, ${offline} offline из ${isapiCams.length}`;
+    }
+
+    // ── extraCameras (камеры другого типа, физически на том же объекте) ──
+    // На «Складе» к HiWatch NVR пришпилена Wi-Fi Tapo — не часть NVR, но в
+    // отчёте рисуется как дополнительная ячейка в общей сетке Склада.
+    // Сейчас поддерживается только type:'tplink-tapo' (если появятся другие
+    // типы extra-камер — добавим аналогичные ветки).
+    if (!isapiError && Array.isArray(sys.extraCameras) && sys.extraCameras.length > 0) {
+      const startIdx = result.cameras.length;
+      // Назначаем индексы и id, чтобы grid'ы reporter'а не схлопнулись
+      const tapoExtras = sys.extraCameras
+        .filter(c => c.type === 'tplink-tapo')
+        .map((c, i) => ({ ...c, index: startIdx + i, id: startIdx + i + 1 }));
+
+      if (tapoExtras.length > 0) {
+        const { cameras: extras } = await checkTplinkTapoSystem({
+          id: sys.id,                  // last-good сохраняем рядом с основным
+          cameras: tapoExtras,
+        });
+        // Помечаем тип, чтобы snapshots.js знал, какой grab'ер вызывать.
+        for (const e of extras) {
+          e._extraType = 'tplink-tapo';
+          // Передаём в snapshots.js контекст для RTSP URL
+          // (sys-level rtspUserEnv тут нет — берём из самой камеры).
+        }
+        result.cameras = result.cameras.concat(extras);
+
+        const totalOnline = result.cameras.filter(c => c.online === true).length;
+        const total       = result.cameras.length;
+        result.aiSummary  = `ISAPI+Tapo: ${totalOnline} online из ${total} (вкл. ${extras.length} extra)`;
+      }
     }
 
     systemResults.push(result);
@@ -410,6 +442,24 @@ for (let i = 0; i < systems.length; i++) {
     const offline = rtCams.filter(c => c.online === false).length;
     const src = method === 'portal' ? 'Портал РТ' : 'Ping';
     result.aiSummary = `${src}: ${online} online, ${offline} offline из ${rtCams.length}`;
+    systemResults.push(result);
+    continue;
+  }
+
+  // ── TP-Link Tapo (Wi-Fi камеры, проверка через TCP-probe HTTPS-демона) ──
+  if (sys.type === 'tplink-tapo') {
+    const { cameras: tapoCams, error: tapoErr } = await checkTplinkTapoSystem({
+      id: sys.id,
+      cameras: sys.cameras || [],
+    });
+    if (tapoErr) {
+      result.error = tapoErr;
+    } else {
+      result.cameras = tapoCams;
+      const online  = tapoCams.filter(c => c.online === true).length;
+      const offline = tapoCams.filter(c => c.online === false).length;
+      result.aiSummary = `Tapo: ${online} online, ${offline} offline из ${tapoCams.length}`;
+    }
     systemResults.push(result);
     continue;
   }
@@ -695,38 +745,59 @@ if (!isDryRun) {
   // ── Helpdesk: дедупликация через state.js ──────────────────────────────
   // 1. Текущее множество сломанных камер
   // 2. Сравниваем со state, получаем diff
-  // 3. Сохраняем новый state в любом случае
-  // 4. Отправляем письмо ТОЛЬКО при наличии изменений (newlyBroken | recovered)
+  // 3. Сохраняем новый state ТОЛЬКО при полной проверке (без --only).
+  //    Если --only задан, выборка systemResults частичная: непроверенные
+  //    системы выглядели бы как «восстановленные» и при следующем полном
+  //    прогоне снова попали бы в newlyBroken → ложный helpdesk.
+  // 4. Отправляем письмо ТОЛЬКО при наличии новой поломки.
   const brokenCams = collectBrokenCameras(systemResults);
   const state = loadState();
   const diff  = diffAndUpdate(state, brokenCams);
-  saveState(state);
+  if (onlyId) {
+    log.warn('helpdesk', `--only ${onlyId}: state не сохраняем (выборка частичная), helpdesk-письмо не отправляем`);
+  } else {
+    saveState(state);
+  }
 
   log.info('helpdesk', 'Дедупликация заявок', {
     current: brokenCams.length,
     newlyBroken: diff.newlyBroken.length,
     recovered:   diff.recovered.length,
     stillBroken: diff.stillBroken.length,
+    stateSaved:  !onlyId,
   });
 
-  if (diff.newlyBroken.length > 0 || diff.recovered.length > 0) {
+  // Триггер отправки — только новая поломка. Восстановление не тревожит
+  // helpdesk (по требованию: оператору не нужны письма «всё хорошо»).
+  // В письмо при этом включаем все актуально сломанные камеры
+  // (newlyBroken + stillBroken), чтобы оператор видел полную картину
+  // по объекту, а не только то, что добавилось с прошлого прогона.
+  //
+  // При --only письмо не шлём: выборка частичная, diff.newlyBroken
+  // может содержать ложные срабатывания.
+  if (diff.newlyBroken.length > 0 && !onlyId) {
+    const totalBroken = diff.newlyBroken.length + diff.stillBroken.length;
     log.stepStart('helpdesk', 'Отправка helpdesk-письма', {
       to: process.env.HELPDESK_TO,
       newlyBroken: diff.newlyBroken.length,
-      recovered:   diff.recovered.length,
+      stillBroken: diff.stillBroken.length,
+      total:       totalBroken,
     });
     try {
       await sendHelpdeskReport({
         newlyBroken: diff.newlyBroken,
-        recovered:   diff.recovered,
+        stillBroken: diff.stillBroken,
         runMeta,
       });
       log.stepEnd('helpdesk', 'ok',
-        `Helpdesk-письмо отправлено (${diff.newlyBroken.length} новых, ${diff.recovered.length} восстановл.)`);
+        `Helpdesk-письмо отправлено (${diff.newlyBroken.length} новых, всего в письме ${totalBroken})`);
     } catch (err) {
       log.stepEnd('helpdesk', 'fail', 'Helpdesk-письмо не отправлено', { error: err.message });
       emailFailures++;
     }
+  } else if (diff.recovered.length > 0 && diff.stillBroken.length === 0) {
+    log.info('helpdesk',
+      `${diff.recovered.length} камер восстановлено, новых поломок нет — helpdesk не дёргаем`);
   } else if (diff.stillBroken.length > 0) {
     log.info('helpdesk',
       `Изменений нет — helpdesk не дёргаем (${diff.stillBroken.length} камер всё ещё сломаны)`);
@@ -734,17 +805,21 @@ if (!isDryRun) {
     log.info('helpdesk', 'Все камеры в норме — helpdesk-письмо не нужно');
   }
 } else {
-  // Даже в dry-run обновляем state, чтобы корректно отдиффить следующий прогон.
+  // DRY-RUN: state не трогаем. Раньше тут был saveState(), но при выборочном
+  // прогоне (--only one-system) выборка systemResults неполная: камеры из
+  // непроверенных систем выглядели бы как «восстановленные» и при следующем
+  // настоящем прогоне снова попали бы в newlyBroken → ложное helpdesk-письмо.
+  // Считаем diff только для лога, но НЕ сохраняем.
   const brokenCams = collectBrokenCameras(systemResults);
   const state = loadState();
   const diff  = diffAndUpdate(state, brokenCams);
-  saveState(state);
-  log.info('email', 'DRY-RUN: email не отправлен', {
+  log.info('email', 'DRY-RUN: email не отправлен, state не сохранён', {
     groups: groupReports.length,
     issues: totalIssues,
     newlyBroken: diff.newlyBroken.length,
     recovered:   diff.recovered.length,
     stillBroken: diff.stillBroken.length,
+    only:        onlyId || 'all',
   });
 }
 

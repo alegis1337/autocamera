@@ -11,8 +11,14 @@
     "passEnv": "TRASSIR_PASS",
     "displayMode": "grid",
     "gridColumns": 5,
-    "knownOffline": ["210", "215"],
-    "helpdeskIgnore": ["210", "215"],
+    "knownOffline": [
+      "210",
+      "215"
+    ],
+    "helpdeskIgnore": [
+      "210",
+      "215"
+    ],
     "cameraGuids": {
       "CVh9xSV6": "204",
       "G6nesXma": "210",
@@ -48,28 +54,143 @@
     "enabled": true,
     "displayMode": "grid",
     "gridColumns": 6,
-    "unusedChannels": [10, 11],
+    "unusedChannels": [
+      10,
+      11
+    ],
     "nvrIp": "10.0.120.192",
     "rtspUser": "EfremovOE",
     "rtspPass": "gf1Ok5Y5",
     "viaNvr": true,
     "cameras": [
-      { "index": 0,  "name": "CH1",  "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 1,  "rtspPath": "/ch01/0" },
-      { "index": 1,  "name": "CH2",  "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 2,  "rtspPath": "/ch02/0" },
-      { "index": 2,  "name": "CH3",  "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 3,  "rtspPath": "/ch03/0" },
-      { "index": 3,  "name": "CH4",  "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 4,  "rtspPath": "/ch04/0" },
-      { "index": 4,  "name": "CH5",  "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 5,  "rtspPath": "/ch05/0" },
-      { "index": 5,  "name": "CH6",  "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 6,  "rtspPath": "/ch06/0" },
-      { "index": 6,  "name": "CH7",  "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 7,  "rtspPath": "/ch07/0" },
-      { "index": 7,  "name": "CH8",  "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 8,  "rtspPath": "/ch08/0" },
-      { "index": 8,  "name": "CH9",  "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 9,  "rtspPath": "/ch09/0" },
-      { "index": 9,  "name": "CH10", "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 10, "rtspPath": "/ch10/0" },
-      { "index": 10, "name": "CH11", "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 11, "rtspPath": "/ch11/0" },
-      { "index": 11, "name": "CH12", "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 12, "rtspPath": "/ch12/0" },
-      { "index": 12, "name": "CH13", "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 13, "rtspPath": "/ch13/0" },
-      { "index": 13, "name": "CH14", "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 14, "rtspPath": "/ch14/0" },
-      { "index": 14, "name": "CH15", "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 15, "rtspPath": "/ch15/0" },
-      { "index": 15, "name": "CH16", "ip": "10.0.120.192", "viaNvr": true, "nvrChannel": 16, "rtspPath": "/ch16/0" }
+      {
+        "index": 0,
+        "name": "CH1",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 1,
+        "rtspPath": "/ch01/0"
+      },
+      {
+        "index": 1,
+        "name": "CH2",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 2,
+        "rtspPath": "/ch02/0"
+      },
+      {
+        "index": 2,
+        "name": "CH3",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 3,
+        "rtspPath": "/ch03/0"
+      },
+      {
+        "index": 3,
+        "name": "CH4",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 4,
+        "rtspPath": "/ch04/0"
+      },
+      {
+        "index": 4,
+        "name": "CH5",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 5,
+        "rtspPath": "/ch05/0"
+      },
+      {
+        "index": 5,
+        "name": "CH6",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 6,
+        "rtspPath": "/ch06/0"
+      },
+      {
+        "index": 6,
+        "name": "CH7",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 7,
+        "rtspPath": "/ch07/0"
+      },
+      {
+        "index": 7,
+        "name": "CH8",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 8,
+        "rtspPath": "/ch08/0"
+      },
+      {
+        "index": 8,
+        "name": "CH9",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 9,
+        "rtspPath": "/ch09/0"
+      },
+      {
+        "index": 9,
+        "name": "CH10",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 10,
+        "rtspPath": "/ch10/0"
+      },
+      {
+        "index": 10,
+        "name": "CH11",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 11,
+        "rtspPath": "/ch11/0"
+      },
+      {
+        "index": 11,
+        "name": "CH12",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 12,
+        "rtspPath": "/ch12/0"
+      },
+      {
+        "index": 12,
+        "name": "CH13",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 13,
+        "rtspPath": "/ch13/0"
+      },
+      {
+        "index": 13,
+        "name": "CH14",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 14,
+        "rtspPath": "/ch14/0"
+      },
+      {
+        "index": 14,
+        "name": "CH15",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 15,
+        "rtspPath": "/ch15/0"
+      },
+      {
+        "index": 15,
+        "name": "CH16",
+        "ip": "10.0.120.192",
+        "viaNvr": true,
+        "nvrChannel": 16,
+        "rtspPath": "/ch16/0"
+      }
     ]
   },
   {
@@ -80,12 +201,28 @@
     "enabled": true,
     "displayMode": "grid",
     "gridColumns": 6,
-    "unusedChannels": [1, 2, 3, 4, 5],
+    "unusedChannels": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
     "urlEnv": "HIWATCH_SKLAD_URL",
     "userEnv": "HIWATCH_SKLAD_USER",
     "passEnv": "HIWATCH_SKLAD_PASS",
     "loginRequired": true,
-    "maxChannelId": 16
+    "maxChannelId": 16,
+    "extraCameras": [
+      {
+        "type": "tplink-tapo",
+        "name": "ТС40",
+        "host": "10.0.120.227",
+        "rtspPath": "/stream1",
+        "rtspUserEnv": "TAPO_RTSP_USER",
+        "rtspPassEnv": "TAPO_RTSP_PASS"
+      }
+    ]
   },
   {
     "id": "ipanda-noviy-ceh",
@@ -102,16 +239,86 @@
     "nvrRtspPass": "admin123",
     "viaNvr": true,
     "cameras": [
-      { "index": 0, "name": "CH1",  "ip": "10.0.120.243", "viaNvr": true, "nvrChannel": 1,  "rtspPath": "/ch01/0" },
-      { "index": 1, "name": "CH2",  "ip": "10.0.120.222", "viaNvr": true, "nvrChannel": 2,  "rtspPath": "/ch02/0" },
-      { "index": 2, "name": "CH3",  "ip": "10.0.120.223", "viaNvr": true, "nvrChannel": 3,  "rtspPath": "/ch03/0" },
-      { "index": 3, "name": "CH4",  "ip": "10.0.120.224", "viaNvr": true, "nvrChannel": 4,  "rtspPath": "/ch04/0" },
-      { "index": 4, "name": "CH5",  "ip": "10.0.120.55",  "viaNvr": true, "nvrChannel": 5,  "rtspPath": "/ch05/0" },
-      { "index": 5, "name": "CH6",  "ip": "10.0.120.226", "viaNvr": true, "nvrChannel": 6,  "rtspPath": "/ch06/0" },
-      { "index": 6, "name": "CH7",  "ip": "10.0.120.228", "viaNvr": true, "nvrChannel": 7,  "rtspPath": "/ch07/0" },
-      { "index": 7, "name": "CH8",  "ip": "10.0.120.57",  "viaNvr": true, "nvrChannel": 8,  "rtspPath": "/ch08/0" },
-      { "index": 8, "name": "CH9",  "ip": "10.0.120.229", "viaNvr": true, "nvrChannel": 9,  "rtspPath": "/ch09/0" },
-      { "index": 9, "name": "CH10", "ip": "10.0.120.220", "viaNvr": true, "nvrChannel": 10, "rtspPath": "/ch10/0" }
+      {
+        "index": 0,
+        "name": "CH1",
+        "ip": "10.0.120.243",
+        "viaNvr": true,
+        "nvrChannel": 1,
+        "rtspPath": "/ch01/0"
+      },
+      {
+        "index": 1,
+        "name": "CH2",
+        "ip": "10.0.120.222",
+        "viaNvr": true,
+        "nvrChannel": 2,
+        "rtspPath": "/ch02/0"
+      },
+      {
+        "index": 2,
+        "name": "CH3",
+        "ip": "10.0.120.223",
+        "viaNvr": true,
+        "nvrChannel": 3,
+        "rtspPath": "/ch03/0"
+      },
+      {
+        "index": 3,
+        "name": "CH4",
+        "ip": "10.0.120.224",
+        "viaNvr": true,
+        "nvrChannel": 4,
+        "rtspPath": "/ch04/0"
+      },
+      {
+        "index": 4,
+        "name": "CH5",
+        "ip": "10.0.120.55",
+        "viaNvr": true,
+        "nvrChannel": 5,
+        "rtspPath": "/ch05/0"
+      },
+      {
+        "index": 5,
+        "name": "CH6",
+        "ip": "10.0.120.226",
+        "viaNvr": true,
+        "nvrChannel": 6,
+        "rtspPath": "/ch06/0"
+      },
+      {
+        "index": 6,
+        "name": "CH7",
+        "ip": "10.0.120.228",
+        "viaNvr": true,
+        "nvrChannel": 7,
+        "rtspPath": "/ch07/0"
+      },
+      {
+        "index": 7,
+        "name": "CH8",
+        "ip": "10.0.120.57",
+        "viaNvr": true,
+        "nvrChannel": 8,
+        "rtspPath": "/ch08/0"
+      },
+      {
+        "index": 8,
+        "name": "CH9",
+        "ip": "10.0.120.229",
+        "viaNvr": true,
+        "nvrChannel": 9,
+        "rtspPath": "/ch09/0"
+      },
+      {
+        "index": 9,
+        "name": "CH10",
+        "ip": "10.0.120.220",
+        "viaNvr": true,
+        "nvrChannel": 10,
+        "rtspPath": "/ch10/0"
+      }
     ]
   },
   {
@@ -129,9 +336,21 @@
     "smbPassEnv": "STROYKA_SMB_PASS",
     "freshnessMin": 60,
     "channels": [
-      { "index": 0, "name": "Канал 9",  "folder": "9"  },
-      { "index": 1, "name": "Канал 11", "folder": "11" },
-      { "index": 2, "name": "Канал 13", "folder": "13" }
+      {
+        "index": 0,
+        "name": "Канал 9",
+        "folder": "9"
+      },
+      {
+        "index": 1,
+        "name": "Канал 11",
+        "folder": "11"
+      },
+      {
+        "index": 2,
+        "name": "Канал 13",
+        "folder": "13"
+      }
     ]
   },
   {
@@ -162,13 +381,48 @@
     "smbPassEnv": "BEWARD_SMB_PASS",
     "freshnessMin": 180,
     "cameras": [
-      { "index": 0, "name": "Beeline Mavi",          "ip": "10.10.10.5",    "port": 5050 },
-      { "index": 1, "name": "Online Berezovka",      "ip": "10.10.10.15",   "port": 5000 },
-      { "index": 2, "name": "Megafon Borodino",      "ip": "10.10.10.23",   "port": 5000 },
-      { "index": 3, "name": "Beeline Pavlova",       "ip": "10.10.10.34",   "port": 5000 },
-      { "index": 4, "name": "MTS Solnyshko",         "ip": "10.10.40.17",   "port": 5000 },
-      { "index": 5, "name": "Megafon Solnechniy",    "ip": "94.73.253.23",  "port": 5000 },
-      { "index": 6, "name": "Megafon Lenta",         "ip": "95.80.64.105",  "port": 5000 }
+      {
+        "index": 0,
+        "name": "Beeline Mavi",
+        "ip": "10.10.10.5",
+        "port": 5050
+      },
+      {
+        "index": 1,
+        "name": "Online Berezovka",
+        "ip": "10.10.10.15",
+        "port": 5000
+      },
+      {
+        "index": 2,
+        "name": "Megafon Borodino",
+        "ip": "10.10.10.23",
+        "port": 5000
+      },
+      {
+        "index": 3,
+        "name": "Beeline Pavlova",
+        "ip": "10.10.10.34",
+        "port": 5000
+      },
+      {
+        "index": 4,
+        "name": "MTS Solnyshko",
+        "ip": "10.10.40.17",
+        "port": 5000
+      },
+      {
+        "index": 5,
+        "name": "Megafon Solnechniy",
+        "ip": "94.73.253.23",
+        "port": 5000
+      },
+      {
+        "index": 6,
+        "name": "Megafon Lenta",
+        "ip": "95.80.64.105",
+        "port": 5000
+      }
     ]
   },
   {
@@ -180,9 +434,30 @@
     "displayMode": "grid",
     "gridColumns": 3,
     "cameras": [
-      { "index": 0, "name": "Аэровокзальная", "host": "10.10.10.30", "port": 85, "userEnv": "IVMS_AERO_USER",    "passEnv": "IVMS_AERO_PASS"    },
-      { "index": 1, "name": "Балахта Т2",      "host": "10.0.156.68", "port": 80, "userEnv": "IVMS_T2_USER",      "passEnv": "IVMS_T2_PASS"      },
-      { "index": 2, "name": "Балахта Мегафон", "host": "10.0.156.81", "port": 80, "userEnv": "IVMS_MEGAFON_USER", "passEnv": "IVMS_MEGAFON_PASS" }
+      {
+        "index": 0,
+        "name": "Аэровокзальная",
+        "host": "10.10.10.30",
+        "port": 85,
+        "userEnv": "IVMS_AERO_USER",
+        "passEnv": "IVMS_AERO_PASS"
+      },
+      {
+        "index": 1,
+        "name": "Балахта Т2",
+        "host": "10.0.156.68",
+        "port": 80,
+        "userEnv": "IVMS_T2_USER",
+        "passEnv": "IVMS_T2_PASS"
+      },
+      {
+        "index": 2,
+        "name": "Балахта Мегафон",
+        "host": "10.0.156.81",
+        "port": 80,
+        "userEnv": "IVMS_MEGAFON_USER",
+        "passEnv": "IVMS_MEGAFON_PASS"
+      }
     ]
   },
   {
@@ -196,16 +471,46 @@
     "portalUrlEnv": "RT_PORTAL_URL",
     "userEnv": "RT_PORTAL_USER",
     "passEnv": "RT_PORTAL_PASS",
-    "excludeApiNames": ["979316"],
-    "portalRetries": 20,
+    "excludeApiNames": [
+      "979316"
+    ],
+    "portalRetries": 7,
     "cameras": [
-      { "index": 0, "name": "Теле2 Солнечный",    "ip": "10.249.132.199" },
-      { "index": 1, "name": "Зеленогорск",         "ip": "192.168.1.64"   },
-      { "index": 2, "name": "Щорса",               "ip": "10.249.32.198"  },
-      { "index": 3, "name": "Бородино",             "ip": "10.249.135.185" },
-      { "index": 4, "name": "Сосновоборск",         "ip": "10.249.132.197" },
-      { "index": 5, "name": "Красная Площадь",      "ip": "10.249.139.100" },
-      { "index": 6, "name": "Павлова Т2",           "ip": "192.168.30.174" }
+      {
+        "index": 0,
+        "name": "Теле2 Солнечный",
+        "ip": "10.249.132.199"
+      },
+      {
+        "index": 1,
+        "name": "Зеленогорск",
+        "ip": "192.168.1.64"
+      },
+      {
+        "index": 2,
+        "name": "Щорса",
+        "ip": "10.249.32.198"
+      },
+      {
+        "index": 3,
+        "name": "Бородино",
+        "ip": "10.249.135.185"
+      },
+      {
+        "index": 4,
+        "name": "Сосновоборск",
+        "ip": "10.249.132.197"
+      },
+      {
+        "index": 5,
+        "name": "Красная Площадь",
+        "ip": "10.249.139.100"
+      },
+      {
+        "index": 6,
+        "name": "Павлова Т2",
+        "ip": "192.168.30.174"
+      }
     ]
   }
 ]

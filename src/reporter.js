@@ -55,6 +55,28 @@ const REPORTS_DIR = path.join(ROOT, 'reports');
 export const REPORT_GROUPS = ['Европласт', 'Онлайн'];
 
 /**
+ * Проверяет, помечен ли канал «не используется» (серый в отчёте).
+ * Логика:
+ *   • TRASSIR — по displayName из sys.knownOffline
+ *   • Остальные системы — по номеру канала в sys.unusedChannels (1-based)
+ *
+ * Экспортируется, чтобы единая логика использовалась и в reporter.js,
+ * и в timeline.js (иначе серые камеры попадают в журнал событий как offline).
+ */
+export function isUnusedChannel(sys, cam) {
+  if (!sys || !cam) return false;
+  if (sys.type === 'trassir-sdk') {
+    const known = sys.knownOffline || [];
+    if (known.length === 0) return false;
+    return known.includes(cam.name);
+  }
+  const list = sys.unusedChannels || [];
+  if (list.length === 0) return false;
+  const ch = cam.id != null ? cam.id : (cam.index ?? 0) + 1;
+  return list.includes(ch);
+}
+
+/**
  * Builds and saves an HTML report.
  *
  * @param {object} params
@@ -108,20 +130,9 @@ export function buildReport({ systemResults, runMeta, group, outputPath, liveMod
     return n;
   };
 
-  // Канал в списке "не используется"?
-  //   • TRASSIR — серость по displayName в sys.knownOffline
-  //   • Остальные системы — по номеру канала в sys.unusedChannels (1-based)
-  const isUnused = (sys, cam) => {
-    if (sys.type === 'trassir-sdk') {
-      const known = sys.knownOffline || [];
-      if (known.length === 0) return false;
-      return known.includes(cam.name);
-    }
-    const list = sys.unusedChannels || [];
-    if (list.length === 0) return false;
-    const ch = cam.id != null ? cam.id : (cam.index ?? 0) + 1;
-    return list.includes(ch);
-  };
+  // Локальный alias на экспортируемый isUnused — оставлен, чтобы не править
+  // остальную часть buildReport.
+  const isUnused = isUnusedChannel;
 
   // ── Секция «Не работают камеры» — карточки с миниатюрами last-good ─────────
   // По каждой упавшей камере: фото (или плейсхолдер если last-good нет),
@@ -703,10 +714,11 @@ export function collectBrokenCameras(systemResults) {
     }
 
     for (const cam of sys.cameras) {
-      // Пропускаем неиспользуемые каналы
-      const unusedList = sys.unusedChannels || [];
+      // Пропускаем неиспользуемые каналы (серые в отчёте) — TRASSIR knownOffline
+      // + остальные системы по unusedChannels. Логика общая с reporter/buildReport
+      // и timeline/diffAndAppend.
+      if (isUnusedChannel(sys, cam)) continue;
       const ch = cam.id != null ? cam.id : (cam.index ?? 0) + 1;
-      if (unusedList.includes(ch)) continue;
 
       // Пропускаем камеры из helpdeskIgnore (по имени)
       const camLabel = cam.name || `${ch}`;
@@ -739,6 +751,29 @@ export function collectBrokenCameras(systemResults) {
 }
 
 /**
+ * Короткая метка камеры для helpdesk-текста.
+ *   "CH15"        → "15"
+ *   "Camera 02"   → "2"
+ *   "IPCamera 03" → "IP3"
+ *   "217"         → "217" (TRASSIR — оставляем как есть)
+ *   "Зеленогорск" → "Зеленогорск" (Ростелеком/iVMS/BEWARD — оставляем)
+ */
+function helpdeskCamLabel(name) {
+  if (!name) return '?';
+  let m = name.match(/^CH0*(\d+)$/i);          if (m) return m[1];
+  m = name.match(/^Camera\s+0*(\d+)$/i);       if (m) return m[1];
+  m = name.match(/^IPCamera\s+0*(\d+)$/i);     if (m) return `IP${m[1]}`;
+  return name;
+}
+
+/**
+ * Убирает суффикс типа " (iPanda)" / " (TRASSIR)" из имени системы.
+ */
+function helpdeskSysName(name) {
+  return (name || '').replace(/\s*\([^)]*\)\s*$/, '').trim();
+}
+
+/**
  * Форматирует timestamp как "24.04.2026 08:00" (МСК-локаль).
  */
 function fmtTs(ts) {
@@ -752,166 +787,153 @@ function fmtTs(ts) {
 }
 
 /**
- * Генерирует HTML-письмо для helpdesk: две таблицы — новые проблемы и
- * восстановленные. Шлётся только при наличии чего-то в любой из них
- * (см. sendHelpdeskReport).
+ * Генерирует HTML-письмо для helpdesk: простой текст, сгруппированный
+ * по объекту. Никаких таблиц / inline-CSS, потому что 1С при приёме
+ * писем не рендерит сложную вёрстку и всё «слипается в кучу».
  *
- * @param {Array}  newlyBroken — новые поломки (есть _firstBrokenAt / _statusChanged)
- * @param {Array}  recovered   — восстановленные камеры
- * @param {object} runMeta     — { startTime, durationMs }
- * @param {string} groupLabel  — "Европласт" / "Онлайн" / ""
+ * Пример вывода (для группы «Европласт»):
+ *
+ *   Здравствуйте!
+ *
+ *   Автоматическая проверка 25.05.2026 10:00 выявила 6 проблем
+ *   по проекту «Европласт»:
+ *
+ *   Офис — не работают камеры: 11, 12, 15
+ *   Новый цех — не работают камеры: 2, 3, 5
+ *
+ *   Письмо сформировано автоматически системой AutoCamera Monitor.
+ *   Для подробностей смотрите полный отчёт по видеонаблюдению.
+ *
+ * @param {Array}  brokenList — текущие сломанные камеры (newly + still)
+ * @param {object} runMeta    — { startTime }
+ * @param {string} groupLabel — "Европласт" / "Онлайн" / ""
  */
-export function buildHelpdeskDiffHtml(newlyBroken, recovered, runMeta, groupLabel = '') {
+export function buildHelpdeskTextHtml(brokenList, runMeta, groupLabel = '') {
   const startDate = new Date(runMeta.startTime);
   const dateStr = fmtTs(runMeta.startTime).slice(0, 10);
   const timeStr = startDate.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 
-  const groupHeader = groupLabel
-    ? `<div style="background:#1a365d;color:#ffffff;padding:6px 14px;font-size:13px;font-weight:700;letter-spacing:0.6px;border-radius:3px;margin:10px 0;">Проект: ${groupLabel.toUpperCase()}</div>`
-    : '';
-
-  // Шапка письма зависит от того, есть ли новые проблемы или это только
-  // отчёт о восстановлении.
-  const hasNew = newlyBroken.length > 0;
-  const hasRecovered = recovered.length > 0;
-
-  const headerBg = hasNew ? '#c53030' : '#276749';
-  const headerIcon = hasNew ? '&#9888;' : '&#10004;';
-  const headerText = hasNew
-    ? 'Изменения статуса камер видеонаблюдения'
-    : 'Камеры восстановлены';
-
-  // ── Таблица новых поломок ──
-  let newSection = '';
-  if (hasNew) {
-    const rows = newlyBroken.map(c => {
-      const statusColor = c.status === 'OFFLINE' ? '#e53e3e' : '#dd6b20';
-      // Если статус сменился — показать "было: X → стало: Y"
-      const statusCell = c._statusChanged
-        ? `<span style="color:#a0aec0;text-decoration:line-through;font-size:11px;">${c._previousStatus}</span> &#8594; <span style="color:${statusColor};font-weight:700;">${c.status}</span>`
-        : `<span style="color:${statusColor};font-weight:700;">${c.status}</span>`;
-      return `<tr style="border-bottom:1px solid #e2e8f0;">
-        <td style="padding:6px 10px;font-size:13px;font-weight:600;color:#2c5282;vertical-align:top;">${c.system}</td>
-        <td style="padding:6px 10px;font-size:13px;vertical-align:top;">${c.camera}</td>
-        <td style="padding:6px 10px;font-size:13px;vertical-align:top;">${statusCell}</td>
-        <td style="padding:6px 10px;font-size:12px;color:#4a5568;vertical-align:top;">${c.notes || ''}</td>
-      </tr>`;
-    }).join('');
-
-    newSection = `
-<h3 style="font-size:14px;color:#c53030;margin:18px 0 6px;">
-  &#9888; Новые проблемы (${newlyBroken.length}):
-</h3>
-<table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;margin:6px 0;">
-  <tr style="background:#2c5282;color:#ffffff;">
-    <th style="padding:8px 10px;font-size:12px;text-align:left;">Система</th>
-    <th style="padding:8px 10px;font-size:12px;text-align:left;">Камера</th>
-    <th style="padding:8px 10px;font-size:12px;text-align:left;">Статус</th>
-    <th style="padding:8px 10px;font-size:12px;text-align:left;">Подробности</th>
-  </tr>
-  ${rows}
-</table>`;
+  // Группируем по системе (сохраняем порядок появления в списке)
+  const bySys = new Map();
+  for (const c of brokenList) {
+    const sysName = helpdeskSysName(c.system);
+    if (!bySys.has(sysName)) bySys.set(sysName, []);
+    bySys.get(sysName).push(c);
   }
 
-  // ── Таблица восстановленных ──
-  let recoveredSection = '';
-  if (hasRecovered) {
-    const rows = recovered.map(c => {
-      const since = fmtTs(c.brokenSince);
-      return `<tr style="border-bottom:1px solid #e2e8f0;">
-        <td style="padding:6px 10px;font-size:13px;font-weight:600;color:#2c5282;">${c.system}</td>
-        <td style="padding:6px 10px;font-size:13px;">${c.camera}</td>
-        <td style="padding:6px 10px;font-size:12px;color:#a0aec0;text-decoration:line-through;">${c.previousStatus || ''}</td>
-        <td style="padding:6px 10px;font-size:12px;color:#276749;">снова работает (была сломана с ${since})</td>
-      </tr>`;
-    }).join('');
+  // Каждый объект — отдельный абзац вида «Офис — не работают камеры: 11, 12, 15»
+  const blocks = [];
+  for (const [sysName, cams] of bySys.entries()) {
+    // Делим на «не работают» (OFFLINE) и «нет записи»
+    const offline = cams.filter(c => c.status === 'OFFLINE');
+    const noRec   = cams.filter(c => c.status === 'нет записи');
 
-    recoveredSection = `
-<h3 style="font-size:14px;color:#276749;margin:18px 0 6px;">
-  &#10004; Восстановлены (${recovered.length}):
-</h3>
-<table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;margin:6px 0;">
-  <tr style="background:#276749;color:#ffffff;">
-    <th style="padding:8px 10px;font-size:12px;text-align:left;">Система</th>
-    <th style="padding:8px 10px;font-size:12px;text-align:left;">Камера</th>
-    <th style="padding:8px 10px;font-size:12px;text-align:left;">Было</th>
-    <th style="padding:8px 10px;font-size:12px;text-align:left;">Стало</th>
-  </tr>
-  ${rows}
-</table>`;
+    const lines = [];
+    if (offline.length > 0) {
+      const labels = offline.map(c => helpdeskCamLabel(c.camera)).join(', ');
+      lines.push(`${sysName} — не работают камеры: ${labels}`);
+    }
+    if (noRec.length > 0) {
+      const labels = noRec.map(c => helpdeskCamLabel(c.camera)).join(', ');
+      lines.push(`${sysName} — нет записи: ${labels}`);
+    }
+    if (lines.length === 0) {
+      // Прочие статусы — на всякий случай
+      const labels = cams.map(c => helpdeskCamLabel(c.camera)).join(', ');
+      lines.push(`${sysName} — проблема: ${labels}`);
+    }
+
+    blocks.push(`<p>${lines.join('<br>')}</p>`);
   }
 
+  const projectPart = groupLabel ? ` по проекту «${groupLabel}»` : '';
+  const total = brokenList.length;
+  const word = total === 1 ? 'проблему' : (total >= 2 && total <= 4 ? 'проблемы' : 'проблем');
+
+  // Намеренно НЕ используем inline-CSS / таблицы — 1С такие письма
+  // отображает «кучей». Простые <p>/<br>/<strong> рендерятся везде.
   return `<!DOCTYPE html>
 <html lang="ru">
-<head><meta charset="UTF-8"><title>Helpdesk — изменения статуса камер ${dateStr}</title></head>
-<body style="font-family:Arial,sans-serif;background:#ffffff;color:#1a202c;margin:0;padding:20px;max-width:740px;">
+<head><meta charset="UTF-8"><title>Не работают камеры ${dateStr}</title></head>
+<body>
 
-<div style="background:${headerBg};color:#ffffff;padding:12px 18px;border-radius:4px;font-size:16px;font-weight:700;">
-  ${headerIcon} ${headerText}
-</div>
+<p>Здравствуйте!</p>
 
-${groupHeader}
+<p>Автоматическая проверка <strong>${dateStr} ${timeStr}</strong> выявила <strong>${total}</strong> ${word}${projectPart}:</p>
 
-<p style="font-size:14px;color:#4a5568;margin:12px 0;">
-  Автоматическая проверка <strong>${dateStr} ${timeStr}</strong>${groupLabel ? ` (проект «${groupLabel}»)` : ''}:
-  ${hasNew ? `<strong>${newlyBroken.length}</strong> новых поломок` : ''}${hasNew && hasRecovered ? ', ' : ''}${hasRecovered ? `<strong>${recovered.length}</strong> восстановлено` : ''}.
-</p>
+${blocks.join('\n')}
 
-${newSection}
-${recoveredSection}
-
-<p style="font-size:12px;color:#718096;margin-top:18px;border-top:1px solid #e2e8f0;padding-top:12px;">
-  Письмо сформировано автоматически системой AutoCamera Monitor.<br>
-  В заявку попадают только <strong>изменения статуса</strong> с прошлого прогона —
-  если камера лежит давно, повторная заявка не создаётся.
-</p>
+<p>—<br>
+Письмо сформировано автоматически системой AutoCamera Monitor.<br>
+Для подробностей смотрите полный отчёт по видеонаблюдению.</p>
 
 </body>
 </html>`;
 }
 
 /**
- * Старая обёртка — оставлена для обратной совместимости с возможными
- * внешними скриптами. Внутри проекта использовать buildHelpdeskDiffHtml.
+ * Старая функция-обёртка — оставлена для обратной совместимости.
+ * Сейчас просто вызывает текстовую версию.
  */
+export const buildHelpdeskDiffHtml = (newlyBroken, _recovered, runMeta, groupLabel = '') =>
+  buildHelpdeskTextHtml(newlyBroken, runMeta, groupLabel);
+
 export const buildHelpdeskHtml = (brokenCams, runMeta, groupLabel = '') =>
-  buildHelpdeskDiffHtml(brokenCams, [], runMeta, groupLabel);
+  buildHelpdeskTextHtml(brokenCams, runMeta, groupLabel);
 
 /**
- * Отправляет helpdesk-письмо о новых поломках и восстановлениях.
- * Если в обеих категориях пусто — ничего не шлёт.
+ * Отправляет helpdesk-письмо о НЕРАБОЧИХ камерах.
+ *
+ * Логика:
+ *   • Триггер отправки — наличие хотя бы одной новой поломки (newlyBroken).
+ *     Если есть только восстановления — НЕ шлём (пользователь явно
+ *     попросил не дёргать helpdesk на recovery).
+ *   • Если триггер сработал, в письме перечисляются ВСЕ актуально
+ *     сломанные камеры (newlyBroken ∪ stillBroken) — чтобы 1С-оператор
+ *     видел полную картину, а не только то, что добавилось с прошлого раза.
  *
  * @param {object} params
- * @param {Array}  params.newlyBroken — результат diffAndUpdate().newlyBroken
- * @param {Array}  params.recovered   — результат diffAndUpdate().recovered
+ * @param {Array}  params.newlyBroken — новые поломки (триггер отправки)
+ * @param {Array}  params.stillBroken — давно лежащие камеры (для полноты письма)
+ * @param {Array}  params.recovered   — восстановленные (НЕ используется,
+ *                                       оставлен для совместимости вызова)
  * @param {object} params.runMeta     — { startTime, durationMs }
  *
  * Совместимость: если передан params.brokenCams (старый API), он трактуется
- * как newlyBroken, а recovered=[] — поведение как раньше.
+ * как newlyBroken и одновременно как stillBroken — всё одной кучей шлём.
  */
-export async function sendHelpdeskReport({ newlyBroken, recovered, brokenCams, runMeta }) {
+export async function sendHelpdeskReport({ newlyBroken, stillBroken, recovered, brokenCams, runMeta }) {
   // Совместимость со старым API.
   if (!newlyBroken && Array.isArray(brokenCams)) {
     newlyBroken = brokenCams;
-    recovered = [];
+    stillBroken = [];
   }
   newlyBroken = newlyBroken || [];
-  recovered   = recovered   || [];
+  stillBroken = stillBroken || [];
+  // recovered нам теперь не нужен — оставлен в сигнатуре, чтобы
+  // не ломать вызывающую сторону.
 
   const helpdeskTo = (process.env.HELPDESK_TO || '')
     .split(',').map(e => e.trim()).filter(Boolean);
   if (helpdeskTo.length === 0) return;
-  if (newlyBroken.length === 0 && recovered.length === 0) return;
+
+  // Главный триггер: только при новой поломке. Восстановления — игнорируем.
+  if (newlyBroken.length === 0) return;
+
+  // В письмо включаем все актуальные поломки (новые + давнишние).
+  const allBroken = [...newlyBroken, ...stillBroken];
 
   // Группируем по проектам — отдельное письмо на каждую группу.
+  // Письмо уходит только в те группы, где есть НОВАЯ поломка
+  // (чтобы при сломавшейся «Онлайн» не дёргать «Европласт»-helpdesk).
   const allByGroup = new Map();
   const ensureGroup = (g) => {
     const key = g || 'Прочее';
-    if (!allByGroup.has(key)) allByGroup.set(key, { newlyBroken: [], recovered: [] });
+    if (!allByGroup.has(key)) allByGroup.set(key, { broken: [], hasNew: false });
     return allByGroup.get(key);
   };
-  for (const c of newlyBroken) ensureGroup(c.group).newlyBroken.push(c);
-  for (const c of recovered)   ensureGroup(c.group).recovered.push(c);
+  for (const c of newlyBroken) ensureGroup(c.group).hasNew = true;
+  for (const c of allBroken)   ensureGroup(c.group).broken.push(c);
 
   const d = new Date(runMeta.startTime);
   const dd = String(d.getDate()).padStart(2, '0');
@@ -938,12 +960,9 @@ export async function sendHelpdeskReport({ newlyBroken, recovered, brokenCams, r
   const fromAddr = process.env.SMTP_USER;
   const fromDomain = (fromAddr.split('@')[1] || senderDomain()).trim();
 
-  const buildMail = (to, groupName, payload) => {
-    const html = buildHelpdeskDiffHtml(payload.newlyBroken, payload.recovered, runMeta, groupName);
-    const parts = [];
-    if (payload.newlyBroken.length) parts.push(`${payload.newlyBroken.length} новых`);
-    if (payload.recovered.length)   parts.push(`${payload.recovered.length} восстановл.`);
-    const subject = `[HELPDESK] ${groupName} — изменения камер ${dd}.${mm}.${yyyy} (${parts.join(', ')})`;
+  const buildMail = (to, groupName, broken) => {
+    const html = buildHelpdeskTextHtml(broken, runMeta, groupName);
+    const subject = `[HELPDESK] ${groupName} — не работают камеры ${dd}.${mm}.${yyyy} (${broken.length} шт.)`;
     return {
       from: `"AutoCamera Helpdesk" <${fromAddr}>`,
       envelope: { from: fromAddr, to: [to] },
@@ -962,12 +981,12 @@ export async function sendHelpdeskReport({ newlyBroken, recovered, brokenCams, r
     };
   };
 
-  const sendOneWithRetry = async (to, groupName, payload) => {
+  const sendOneWithRetry = async (to, groupName, broken) => {
     const maxAttempts = 2;
     let lastErr;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        await transporter.sendMail(buildMail(to, groupName, payload));
+        await transporter.sendMail(buildMail(to, groupName, broken));
         return;
       } catch (err) {
         lastErr = err;
@@ -978,12 +997,14 @@ export async function sendHelpdeskReport({ newlyBroken, recovered, brokenCams, r
   };
 
   // Каждой группе — каждому получателю отдельное письмо (Яндекс SPAM workaround).
+  // Шлём только в те группы, где есть НОВАЯ поломка.
   const failures = [];
   for (const [groupName, payload] of allByGroup) {
-    if (payload.newlyBroken.length === 0 && payload.recovered.length === 0) continue;
+    if (!payload.hasNew) continue;
+    if (payload.broken.length === 0) continue;
     for (const to of helpdeskTo) {
       try {
-        await sendOneWithRetry(to, groupName, payload);
+        await sendOneWithRetry(to, groupName, payload.broken);
       } catch (err) {
         failures.push({ to, groupName, error: err.message });
       }

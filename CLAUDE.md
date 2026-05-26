@@ -1,5 +1,5 @@
 # AutoCamera Monitor — инструкции для агента
-**Версия:** v2.0 | **Проект:** `C:\Users\dsadmin\Desktop\autocamera`
+**Версия:** v2.1 | **Проект:** `C:\Users\dsadmin\Desktop\autocamera`
 
 Автоматизированный мониторинг камер: проверяет 9 систем (Европласт + Онлайн),
 формирует HTML-отчёт со скриншотами камер, рассылает письма заказчику и
@@ -9,6 +9,34 @@ helpdesk. Запуск по расписанию через Планировщи
 Все комментарии и логи — **только на русском**.
 
 ---
+
+## Что нового в v2.1 (май 2026)
+
+1. **Чекер TP-Link Tapo** (`src/tplink-tapo-check.js`, тип `tplink-tapo`) —
+   проверка Wi-Fi камер через RTSP+ffmpeg. Один вызов делает online, recording
+   и снимок одной операцией. RTSP-credentials берутся из «Camera Account»
+   камеры (создаётся в мобильном приложении Tapo, см. README).
+2. **`extraCameras` у систем** — позволяет прицепить камеры другого типа к
+   существующей системе. Используется чтобы ТС40 (Tapo Wi-Fi) шла «17-й
+   камерой» внутри `hiwatch-sklad`, а не отдельным объектом в отчёте.
+3. **Helpdesk-письмо переверстано под 1С** — простой HTML без таблиц/CSS,
+   группировка по объектам строкой: `Офис — не работают камеры: 11, 12, 15`.
+   В одном письме перечислены все актуально сломанные камеры (newly + still),
+   а не только новые. Письма про «восстановлены» больше не отправляются —
+   триггер строго по новой поломке.
+4. **Серые камеры не плодят offline-события** в `state/timeline-*.json`. Раньше
+   HiWatch Склад CH1–CH5 (NO VIDEO + `unusedChannels`) попадали в «Историю за
+   день» — теперь `diffAndAppend` пропускает их через `isUnusedChannel`.
+5. **`--only` не сохраняет state** ни в боевом, ни в dry-run режиме. Раньше
+   выборочный прогон помечал все непроверенные сломанные камеры как
+   «восстановленные», что давало ложные helpdesk-письма при следующем
+   полном прогоне.
+6. **Ростелеком: `portalRetries` снижен с 20 до 7**. 20 попыток × ~45 сек =
+   15 мин (всё окно light-прогона). 7 попыток ≈ 5 мин — хватает на любые
+   кратковременные сбои passport.rt.ru.
+7. **Snapshot-pipeline не лезет в SMB**. `captureAll` явно отсекает
+   `smb-recordings` и `beward-smb` до постановки в очередь — 10 warning-ов
+   «не поддерживает снимки» больше не плодятся.
 
 ## Что нового в v2 (по сравнению с v1)
 
@@ -39,6 +67,7 @@ AutoCamera Monitor (Node.js ≥ 18, ES modules)
 │   ├── trassir            → TRASSIR SDK HTTP API (10.0.120.195:8080)
 │   ├── ipanda-office      → RTSP DESCRIBE через NVR (10.0.120.192)
 │   ├── hiwatch-sklad      → Hikvision ISAPI (10.0.120.30)
+│   │                       + extra: ТС40 (TP-Link Tapo, RTSP 10.0.120.227)
 │   ├── ipanda-noviy-ceh   → RTSP DESCRIBE через NVR (10.0.120.220)
 │   ├── evroplast-stroyka  → SMB-папки записей: \\10.0.120.4\Video\{9,11,13}
 │   └── hiwatch-vyduv      → Hikvision ISAPI
@@ -98,6 +127,7 @@ ISAPI. Ростелеком — единственный случай, где н
 | `detect-device.js` | **(v2)** CLI: автоопределение типа устройства по IP, для мастера добавления |
 | `manage-cameras.mjs` | **(v2)** CLI для menu.ps1: list/gray/ungray/delete/add-system/add-cam/append-env |
 | `manage-gray.mjs` | Старый CLI grey-management, оставлен для совместимости |
+| `tplink-tapo-check.js` | **(v2.1)** Проверка TP-Link Tapo через RTSP+ffmpeg. Возвращает online/recording/snapshotPath. KLAP-handshake для SD-карты — TODO. |
 
 ---
 
@@ -148,16 +178,32 @@ ISAPI. Ростелеком — единственный случай, где н
 
 ---
 
-## Helpdesk-логика
+## Helpdesk-логика (обновлено в v2.1)
 
-- Письмо уходит **только при изменениях** (новые broken или восстановленные).
-  Если те же N камер сломаны второй прогон подряд — письмо НЕ повторяется.
+- **Триггер строго по новой поломке** (`diff.newlyBroken.length > 0`).
+  Recovered больше НЕ запускает отправку — оператору не нужны письма
+  «всё хорошо».
+- При срабатывании триггера в письме перечисляются **все актуально сломанные
+  камеры** группы (`newlyBroken ∪ stillBroken`), а не только добавочные.
+  Так оператор сразу видит полную картину по объекту.
+- Письма **отдельные на каждую группу** (`"Европласт"` / `"Онлайн"`); группа
+  без новых поломок не получает письма, даже если в другой группе что-то
+  сломалось.
+- **Формат — простой текст** для 1С: абзацами вида `Офис — не работают камеры:
+  11, 12, 15`. Никаких inline-CSS и таблиц — 1С их слипал в кучу. Имена
+  камер сокращаются: `CH15`→`15`, `Camera 02`→`2`, `IPCamera 03`→`IP3`.
 - Сравнение через `state/helpdesk-state.json` (ключ: `<sysId>|<camera name>`).
-- Группа определяется полем `group` каждой системы (`"Европласт"` / `"Онлайн"`),
-  отдельное письмо на каждую группу.
 - Камеры из `helpdeskIgnore` / `unusedChannels` / TRASSIR-`knownOffline` не
-  попадают в helpdesk.
+  попадают в helpdesk. `isUnusedChannel` экспортируется из `reporter.js` и
+  переиспользуется в `state.js` / `timeline.js` / `collectBrokenCameras`.
 - Сброс helpdesk-state — `node src/index.js --reset-state` или из меню.
+
+### `--only` (выборочный прогон) ⚠️
+
+`--only <sysId>` (как в боевом, так и в `--dry-run` режиме) **НЕ сохраняет
+state и НЕ шлёт helpdesk** — выборка частичная, иначе все непроверенные
+сломанные камеры были бы помечены как «восстановленные» и при следующем
+полном прогоне дали бы ложное письмо `newlyBroken`.
 
 ---
 
@@ -201,6 +247,7 @@ ISAPI. Ростелеком — единственный случай, где н
 | **BEWARD** | `BEWARD_SMB_USER`, `BEWARD_SMB_PASS` | SMB |
 | **Стройка** | `STROYKA_SMB_USER`, `STROYKA_SMB_PASS` | SMB |
 | **Ростелеком** | `RT_PORTAL_URL`, `RT_PORTAL_USER`, `RT_PORTAL_PASS` | Портал |
+| **TP-Link Tapo (v2.1)** | `TAPO_RTSP_USER`, `TAPO_RTSP_PASS` | Camera Account для RTSP/snapshot. `TAPO_USER`/`TAPO_PASS` — cloud-аккаунт, на будущее для KLAP API |
 | **Bitrix (v2)** | `BITRIX_WEBHOOK_URL`, `BITRIX_ROOT_FOLDER_ID`, `BITRIX_STORAGE_ID` | Загрузка снимков |
 | **Системные (v2)** | `FFMPEG_PATH`, `SNAPSHOT_RETENTION_DAYS` | ffmpeg для RTSP-снимков, retention папок в Bitrix |
 | **Тестирование** | `TEST_MODE=true` | Принудительно перенаправляет письма (TEST-режим, на проде НЕ задавать) |
@@ -239,10 +286,73 @@ ISAPI. Ростелеком — единственный случай, где н
 
 ---
 
+## extraCameras (v2.1)
+
+`extraCameras` — массив на уровне системы, позволяющий «прицепить» камеры
+другого типа к существующей системе. Используется, чтобы Wi-Fi Tapo
+(физически отдельный аппарат) показывалась в отчёте как продолжение
+NVR-сетки, а не как отдельный объект.
+
+Пример (`hiwatch-sklad`):
+```json
+"extraCameras": [{
+  "type": "tplink-tapo",
+  "name": "ТС40",
+  "host": "10.0.120.227",
+  "rtspPath": "/stream1",
+  "rtspUserEnv": "TAPO_RTSP_USER",
+  "rtspPassEnv": "TAPO_RTSP_PASS"
+}]
+```
+
+Обработка:
+- В `index.js` после основного чекера системы (только для `hiwatch`/`hikvision`)
+  идёт ветка `if (Array.isArray(sys.extraCameras) ...)`. Tapo-extra вызывает
+  `checkTplinkTapoSystem` с `id: sys.id` (чтобы last-good лежал в
+  `screenshots/last-good/<sysId>/`).
+- В результат камера получает `_extraType: 'tplink-tapo'` — это маркер для
+  `snapshots.js → captureSnapshot`, чтобы взять правильный grab'ер.
+- Индексы и id назначаются продолжая основной диапазон (16-я камера NVR →
+  ТС40 получает index=16, id=17).
+- `aiSummary` системы становится `ISAPI+Tapo: N online из M (вкл. K extra)`.
+
+Чтобы добавить ещё один тип extra-камер — нужна аналогичная ветка в `index.js`
+и `case` в `snapshots.js → captureSnapshot`.
+
+---
+
+## TP-Link Tapo (v2.1)
+
+Чекер `tplink-tapo-check.js`. Поток:
+1. RTSP-probe + snapshot одной операцией через ffmpeg
+   (`rtsp://<user>:<pass>@<host>:554/stream1`).
+2. Кадр получен → `online=true, recording=true, snapshotPath=...`.
+3. Кадр не получен → разбор stderr: 401, 404, timeout — отличаем «креды
+   неверные» от «камера в сети не отвечает».
+4. Fallback: TCP-probe 443 + `verifyTapoHttps` (Tapo всегда отвечает JSON
+   с `error_code`) → online=true с пометкой что RTSP-поток не открылся.
+5. Если 443 закрыт, но ping ok → `Tapo-демон не отвечает (зависла?)`.
+
+**Camera Account** = отдельный логин/пароль для RTSP, создаётся в мобильном
+приложении Tapo → Settings → Advanced → Camera Account. Без него порт 554
+закрыт и API не работает.
+
+**Полная проверка SD-карты** (свободное место, статус записи) — не
+реализована. Современные Tapo требуют **KLAP-handshake** на :443
+(RSA-обмен ключами + AES-128-CBC c session key). Это ~250 строк crypto-кода
+под конкретную модель. Сейчас `recording=true` приближённо: «RTSP-поток жив
+= камера снимает = пишет, если microSD исправна». Прямой контроль SD
+помечен `TODO(recording-sd)` в `tplink-tapo-check.js`.
+
+---
+
 ## Версионность
 
-- **v2.0** (май 2026) — описано выше. Финальный архив v2-dev истории: ветка
-  `v2-dev` в `git@github.com:alegis1337/autocamera.git`.
+- **v2.1** (26 мая 2026) — TP-Link Tapo, extraCameras, helpdesk под 1С,
+  фильтры серых в timeline, --only безопасный.
+- **v2.0** (май 2026) — live monitor, snapshots, period report, helpdesk
+  dedupe. Финальный архив v2-dev истории: ветка `v2-dev` в
+  `git@github.com:alegis1337/autocamera.git`.
 - **v1.0.1** (апрель 2026) — фикс детектирования битых mp4 на Стройке.
 - **v1.0** (март 2026) — первый прод-релиз: 9 систем, отчёты по группам,
   helpdesk, планировщик, серый маркер камер.

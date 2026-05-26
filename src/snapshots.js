@@ -148,6 +148,53 @@ async function snapRtsp(sys, cam, localPath) {
 }
 
 /**
+ * Snapshot для TP-Link Tapo: тот же RTSP+ffmpeg, что и iPanda, но URL
+ * собирается из Camera Account (sys.rtspUserEnv / sys.rtspPassEnv).
+ * Главное отличие — Tapo по умолчанию слушает /stream1 (HD), без NVR-обвязки.
+ */
+async function snapTplinkTapo(sys, cam, localPath) {
+  const ffmpeg   = process.env.FFMPEG_PATH || 'ffmpeg';
+  // Креды Camera Account: сначала per-camera (extra-камера в hiwatch-системе),
+  // потом per-system (отдельная Tapo-система с общими кредами).
+  const rtspUser = cam.rtspUser
+                || (cam.rtspUserEnv ? process.env[cam.rtspUserEnv] : '')
+                || (sys.rtspUserEnv ? process.env[sys.rtspUserEnv] : '');
+  const rtspPass = cam.rtspPass
+                || (cam.rtspPassEnv ? process.env[cam.rtspPassEnv] : '')
+                || (sys.rtspPassEnv ? process.env[sys.rtspPassEnv] : '');
+  if (!rtspUser || !rtspPass) {
+    return { ok: false, error: 'нет Camera Account кредов (rtspUserEnv/rtspPassEnv)' };
+  }
+  if (!cam.host) return { ok: false, error: 'нет cam.host' };
+
+  const u = encodeURIComponent(rtspUser);
+  const p = encodeURIComponent(rtspPass);
+  const rtspPath = cam.rtspPath || '/stream1';
+  const rtspUrl = `rtsp://${u}:${p}@${cam.host}:554${rtspPath}`;
+
+  const args = [
+    '-rtsp_transport', 'tcp',
+    '-y', '-i', rtspUrl,
+    '-frames:v', '1', '-q:v', '2',
+    '-update', '1',
+    '-loglevel', 'error',
+    localPath,
+  ];
+  try {
+    await execFileP(ffmpeg, args, { timeout: 15_000, windowsHide: true });
+    if (!fs.existsSync(localPath) || fs.statSync(localPath).size < 200) {
+      return { ok: false, error: 'ffmpeg создал пустой/слишком маленький файл' };
+    }
+    return { ok: true, fromFile: true };
+  } catch (err) {
+    const stderr = (err.stderr || '').toString().trim();
+    const reason = stderr ? stderr.split('\n').slice(-2).join(' | ').slice(0, 200)
+                          : err.message.slice(0, 200);
+    return { ok: false, error: `ffmpeg: ${reason}` };
+  }
+}
+
+/**
  * Кэш sid TRASSIR per host:port. Хранит Promise<sid>, чтобы N параллельных
  * snapTrassir для одной системы делали ровно один login.
  */
@@ -406,9 +453,12 @@ function trassirBinary(host, port, pathQuery, timeoutMs = 8000) {
  */
 export async function captureSnapshot(runId, sys, cam) {
   const localPath = localPathFor(runId, sys.id, cam);
+  // Для extra-камер (например, Tapo, припаркованная в hiwatch-системе)
+  // протокол кадра — это её собственный тип, а не тип контейнера.
+  const snapType = cam._extraType || sys.type;
 
   let result;
-  switch (sys.type) {
+  switch (snapType) {
     case 'hikvision-multi':
       result = await snapHikvisionMulti(sys, cam);
       break;
@@ -425,8 +475,11 @@ export async function captureSnapshot(runId, sys, cam) {
     case 'rt-portal':
       result = await snapRostelecom(sys, cam);
       break;
+    case 'tplink-tapo':
+      result = await snapTplinkTapo(sys, cam, localPath);
+      break;
     default:
-      return { ok: false, error: `тип системы ${sys.type} не поддерживает снимки` };
+      return { ok: false, error: `тип системы ${snapType} не поддерживает снимки` };
   }
 
   // Если получили буфер — пишем на диск
@@ -467,6 +520,14 @@ export async function captureAll(systemResults, runId, options = {}) {
       const unused = sys.unusedChannels || [];
       const ch = cam.id != null ? cam.id : (cam.index ?? 0) + 1;
       if (unused.includes(ch)) continue;
+      // Тип «камеры» для снапшота. Для extra-камер (например, Tapo внутри
+      // hiwatch-NVR) берём из cam._extraType — у них своё API.
+      const snapType = cam._extraType || sys.type;
+      // SMB-системы хранят файлы записей, видеопотока для grab'а нет.
+      // Раньше captureSnapshot честно ругался «не поддерживает» 10 раз за
+      // прогон — отсекаем их здесь, чтобы не плодить warning'и и не тратить
+      // worker'ы concurrency-пула.
+      if (snapType === 'smb-recordings' || snapType === 'beward-smb') continue;
       targets.push({ sys, cam });
     }
   }

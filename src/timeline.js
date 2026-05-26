@@ -23,6 +23,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { isUnusedChannel } from './reporter.js';
 
 const TIMELINE_DIR = path.resolve('state');
 
@@ -143,6 +144,11 @@ export function diffAndAppend(timeline, systemResults, now = new Date()) {
   for (const sys of systemResults) {
     if (!sys || !Array.isArray(sys.cameras)) continue;
     for (const cam of sys.cameras) {
+      // Серые/неиспользуемые камеры (unusedChannels, knownOffline для TRASSIR)
+      // не должны попадать в журнал событий. Иначе они стабильно фиксируются
+      // как offline и засоряют "Историю за день" и helpdesk-сводки.
+      if (isUnusedChannel(sys, cam)) continue;
+
       const key = cameraKey(sys.id, cam.name || `Камера ${cam.index + 1}`);
       seenKeys.add(key);
 
