@@ -1,7 +1,35 @@
 # AutoCamera Monitor
 $ProjectDir = "C:\Users\dsadmin\Desktop\autocamera"
-$Version    = "v1.0"
+$Version    = "v2.2"
 Set-Location $ProjectDir
+
+# UTF-8 для вывода node-скриптов (имена систем в systems.json — кириллица).
+# Без этого Russian-вывод из node превращается в кашу на консоли cp866/1251.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding           = [System.Text.Encoding]::UTF8
+
+# Транслит кириллицы в латиницу — для отображения имён систем/камер
+# в стиле остального меню (всё на translit'е). Маппинг сделан по
+# Unicode code points (0x0410..0x044F + 0x0401/0x0451), а не по буквенным
+# литералам — это важно, т.к. menu.ps1 хранится в UTF-8 без BOM, а PS 5.1
+# читает его в системной cp1251. Литералы кириллицы внутри файла поэтому
+# бьются, а целочисленные сравнения — нет.
+function ConvertTo-Translit {
+    param([string]$Text)
+    if (-not $Text) { return $Text }
+    $upper = @('A','B','V','G','D','E','Zh','Z','I','Y','K','L','M','N','O','P','R','S','T','U','F','Kh','Ts','Ch','Sh','Sch','','Y','','E','Yu','Ya')
+    $lower = @('a','b','v','g','d','e','zh','z','i','y','k','l','m','n','o','p','r','s','t','u','f','kh','ts','ch','sh','sch','','y','','e','yu','ya')
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($ch in $Text.ToCharArray()) {
+        $code = [int]$ch
+        if     ($code -ge 0x0410 -and $code -le 0x042F) { $null = $sb.Append($upper[$code - 0x0410]) }
+        elseif ($code -ge 0x0430 -and $code -le 0x044F) { $null = $sb.Append($lower[$code - 0x0430]) }
+        elseif ($code -eq 0x0401)                       { $null = $sb.Append('Yo') }
+        elseif ($code -eq 0x0451)                       { $null = $sb.Append('yo') }
+        else                                            { $null = $sb.Append($ch) }
+    }
+    return $sb.ToString()
+}
 
 function Get-EnvValue {
     param($Key)
@@ -41,23 +69,28 @@ function Show-Menu {
     if (-not $reportEvroplast) { $reportEvroplast = "$reportFallback (fallback)" }
     if (-not $reportOnline)    { $reportOnline    = "$reportFallback (fallback)" }
 
+    # schedule.json v2: две задачи — light (каждые N минут) и daily (раз в день).
     $schedulePath = Join-Path $ProjectDir "config\schedule.json"
     $schedInfo = "ne nastroeno"
     if (Test-Path $schedulePath) {
-        $sch = Get-Content $schedulePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        $intH = [int]$sch.intervalHours
-        $intM = [int]$sch.intervalMinutes
-        if ($intH -gt 0 -or $intM -gt 0) {
-            $schedInfo = "$($sch.startTimeMSK) MSK, kazhdye ${intH}ch ${intM}min"
+        $sch       = Get-Content $schedulePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $lightCfg  = $sch.light
+        $dailyCfg  = $sch.daily
+        if ($lightCfg -and $dailyCfg) {
+            $lightInt = [int]$lightCfg.intervalMinutes
+            $schedInfo = "Light $($lightCfg.startTimeMSK) MSK kazhdye ${lightInt}min, Daily $($dailyCfg.startTimeMSK) MSK"
+            $lightOk = $false; $dailyOk = $false
+            if ($lightCfg.taskName) {
+                $lightOk = [bool](Get-ScheduledTask -TaskName $lightCfg.taskName -ErrorAction SilentlyContinue)
+            }
+            if ($dailyCfg.taskName) {
+                $dailyOk = [bool](Get-ScheduledTask -TaskName $dailyCfg.taskName -ErrorAction SilentlyContinue)
+            }
+            if     ($lightOk -and $dailyOk) { $schedInfo += " [AKTIVNO]" }
+            elseif ($lightOk -or  $dailyOk) { $schedInfo += " [chastichno]" }
+            else                            { $schedInfo += " [ne primeneno]" }
         } else {
-            $schedInfo = "$($sch.startTimeMSK) MSK, odin raz v den"
-        }
-        $taskName = $sch.taskName
-        $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        if ($existing) {
-            $schedInfo += " [AKTIVNO]"
-        } else {
-            $schedInfo += " [ne primeneno]"
+            $schedInfo = "staryy format schedule.json (net light/daily)"
         }
     }
 
@@ -118,73 +151,95 @@ function Show-Menu {
 }
 
 function Setup-Schedule {
+    # schedule.json v2: два блока — light (каждые N мин) и daily (раз в день).
     $configPath = Join-Path $ProjectDir "config\schedule.json"
-    $config = Get-Content $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $config     = Get-Content $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+
+    if (-not $config.light -or -not $config.daily) {
+        Clear-Host
+        Write-Host ""
+        Write-Host "  Oshibka: config\schedule.json ne soderzhit blokov 'light' i 'daily'." -ForegroundColor Red
+        Write-Host "  Format v2 ozhidaet:" -ForegroundColor Gray
+        Write-Host "    { light: { taskName, intervalMinutes, startTimeMSK, durationHours }," -ForegroundColor DarkGray
+        Write-Host "      daily: { taskName, startTimeMSK } }" -ForegroundColor DarkGray
+        Read-Host "  Enter - nazad"
+        return
+    }
 
     Clear-Host
     Write-Host ""
-    Write-Host "  === Nastroyka raspisaniya ===" -ForegroundColor Cyan
+    Write-Host "  === Nastroyka raspisaniya (v2: Light + Daily) ===" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  Tekushchie nastroyki:" -ForegroundColor White
-    Write-Host "    Vremya zapuska (MSK): $($config.startTimeMSK)" -ForegroundColor Gray
-    $intH = [int]$config.intervalHours
-    $intM = [int]$config.intervalMinutes
-    if ($intH -gt 0 -or $intM -gt 0) {
-        Write-Host "    Interval: kazhdye ${intH}ch ${intM}min" -ForegroundColor Gray
-    } else {
-        Write-Host "    Rezhim: odin raz v den" -ForegroundColor Gray
-    }
+    Write-Host "    Light  (proverka statusov + live.html, bez email):" -ForegroundColor Gray
+    Write-Host "      Start (MSK):  $($config.light.startTimeMSK)" -ForegroundColor DarkCyan
+    Write-Host "      Interval:     kazhdye $([int]$config.light.intervalMinutes) min" -ForegroundColor DarkCyan
+    Write-Host "      Duration:     $([int]$config.light.durationHours) ch" -ForegroundColor DarkCyan
+    Write-Host "    Daily  (snapshoty + email + helpdesk):" -ForegroundColor Gray
+    Write-Host "      Start (MSK):  $($config.daily.startTimeMSK)" -ForegroundColor DarkCyan
 
-    $taskName = $config.taskName
-    $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if ($existing) {
-        Write-Host "    Zadacha v planirovshchike: DA" -ForegroundColor Green
-    } else {
-        Write-Host "    Zadacha v planirovshchike: NET" -ForegroundColor Yellow
-    }
+    $lightExisting = Get-ScheduledTask -TaskName $config.light.taskName -ErrorAction SilentlyContinue
+    $dailyExisting = Get-ScheduledTask -TaskName $config.daily.taskName -ErrorAction SilentlyContinue
     Write-Host ""
-    Write-Host "  1  Izmenit vremya zapuska" -ForegroundColor White
-    Write-Host "  2  Izmenit interval" -ForegroundColor White
-    Write-Host "  3  Primenit raspisanie (sozdat zadachu)" -ForegroundColor Green
-    Write-Host "  4  Udalit zadachu iz planirovshchika" -ForegroundColor Red
+    if ($lightExisting) { Write-Host "    Zadacha '$($config.light.taskName)': DA"  -ForegroundColor Green }
+    else                { Write-Host "    Zadacha '$($config.light.taskName)': NET" -ForegroundColor Yellow }
+    if ($dailyExisting) { Write-Host "    Zadacha '$($config.daily.taskName)': DA"  -ForegroundColor Green }
+    else                { Write-Host "    Zadacha '$($config.daily.taskName)': NET" -ForegroundColor Yellow }
+
+    Write-Host ""
+    Write-Host "  1  Izmenit vremya zapuska Light (MSK)" -ForegroundColor White
+    Write-Host "  2  Izmenit interval Light (minut)" -ForegroundColor White
+    Write-Host "  3  Izmenit Duration Light (chasov)" -ForegroundColor White
+    Write-Host "  4  Izmenit vremya zapuska Daily (MSK)" -ForegroundColor White
+    Write-Host "  5  Primenit raspisanie (sozdat obe zadachi)" -ForegroundColor Green
+    Write-Host "  6  Udalit obe zadachi iz planirovshchika" -ForegroundColor Red
     Write-Host "  0  Nazad" -ForegroundColor DarkGray
     Write-Host ""
 
     $ch = Read-Host "  Vyberi punkt"
     switch ($ch) {
         "1" {
-            $newTime = Read-Host "  Vremya zapuska MSK (naprimer 10:00)"
+            $newTime = Read-Host "  Vremya zapuska Light MSK (naprimer 06:00)"
             if ($newTime -match '^\d{1,2}:\d{2}$') {
-                $config.startTimeMSK = $newTime
-                $config | ConvertTo-Json | Set-Content $configPath -Encoding UTF8
-                Write-Host "  Vremya izmeneno na $newTime MSK" -ForegroundColor Green
-            } else {
-                Write-Host "  Nevernyy format" -ForegroundColor Red
-            }
+                $config.light.startTimeMSK = $newTime
+                $config | ConvertTo-Json -Depth 5 | Set-Content $configPath -Encoding UTF8
+                Write-Host "  Light start: $newTime MSK" -ForegroundColor Green
+            } else { Write-Host "  Nevernyy format" -ForegroundColor Red }
         }
         "2" {
-            Write-Host "  Primery: 0 = odin raz v den, 4 = kazhdye 4 chasa, 0.5 = kazhdye 30 min" -ForegroundColor Gray
-            $val = Read-Host "  Interval v chasakh (0 = otklyuchit)"
+            $val = Read-Host "  Interval Light v minutakh (naprimer 15)"
             try {
-                $hours = [double]$val
-                $config.intervalHours = [math]::Floor($hours)
-                $config.intervalMinutes = [int](($hours - [math]::Floor($hours)) * 60)
-                $config | ConvertTo-Json | Set-Content $configPath -Encoding UTF8
-                if ($hours -eq 0) {
-                    Write-Host "  Rezhim: odin raz v den" -ForegroundColor Green
-                } else {
-                    Write-Host "  Interval: kazhdye $($config.intervalHours)ch $($config.intervalMinutes)min" -ForegroundColor Green
-                }
-            } catch {
-                Write-Host "  Nevernyy format" -ForegroundColor Red
-            }
+                $mins = [int]$val
+                if ($mins -lt 1) { throw "minimum 1" }
+                $config.light.intervalMinutes = $mins
+                $config | ConvertTo-Json -Depth 5 | Set-Content $configPath -Encoding UTF8
+                Write-Host "  Light interval: kazhdye $mins min" -ForegroundColor Green
+            } catch { Write-Host "  Nevernyy format (nuzhno tseloe >= 1)" -ForegroundColor Red }
         }
         "3" {
-            Write-Host ""
-            Write-Host "  Sozdayu zadachu..." -ForegroundColor Cyan
-            & powershell.exe -ExecutionPolicy Bypass -File "$ProjectDir\setup-schedule.ps1"
+            $val = Read-Host "  Duration Light v chasakh (naprimer 14)"
+            try {
+                $hrs = [int]$val
+                if ($hrs -lt 1 -or $hrs -gt 24) { throw "1..24" }
+                $config.light.durationHours = $hrs
+                $config | ConvertTo-Json -Depth 5 | Set-Content $configPath -Encoding UTF8
+                Write-Host "  Light duration: $hrs ch" -ForegroundColor Green
+            } catch { Write-Host "  Nevernyy format (1..24)" -ForegroundColor Red }
         }
         "4" {
+            $newTime = Read-Host "  Vremya zapuska Daily MSK (naprimer 14:00)"
+            if ($newTime -match '^\d{1,2}:\d{2}$') {
+                $config.daily.startTimeMSK = $newTime
+                $config | ConvertTo-Json -Depth 5 | Set-Content $configPath -Encoding UTF8
+                Write-Host "  Daily start: $newTime MSK" -ForegroundColor Green
+            } else { Write-Host "  Nevernyy format" -ForegroundColor Red }
+        }
+        "5" {
+            Write-Host ""
+            Write-Host "  Sozdayu zadachi (Light + Daily)..." -ForegroundColor Cyan
+            & powershell.exe -ExecutionPolicy Bypass -File "$ProjectDir\setup-schedule.ps1"
+        }
+        "6" {
             Write-Host ""
             & powershell.exe -ExecutionPolicy Bypass -File "$ProjectDir\setup-schedule.ps1" -Remove
         }
@@ -270,7 +325,8 @@ function Manage-OneSystem {
     while ($true) {
         Clear-Host
         Write-Host ""
-        Write-Host "  === Kamery: $SysName ($SysId) ===" -ForegroundColor Cyan
+        $sysNameAscii = ConvertTo-Translit $SysName
+        Write-Host "  === Kamery: $sysNameAscii ($SysId) ===" -ForegroundColor Cyan
         Write-Host ""
 
         # Используем НОВЫЙ manage-cameras.mjs (он поддерживает delete; формат list тот же).
@@ -305,13 +361,14 @@ function Manage-OneSystem {
         Write-Host ""
 
         foreach ($it in $items) {
-            $num = "{0,3}" -f $it.Pos
+            $num   = "{0,3}" -f $it.Pos
+            $label = ConvertTo-Translit $it.Label
             if ($it.Status -eq 'gray') {
                 Write-Host "  $num  [SERAYA] " -NoNewline -ForegroundColor DarkGray
-                Write-Host "$($it.Label)" -ForegroundColor DarkGray
+                Write-Host "$label" -ForegroundColor DarkGray
             } else {
                 Write-Host "  $num  [aktiv]  " -NoNewline -ForegroundColor Green
-                Write-Host "$($it.Label)" -ForegroundColor White
+                Write-Host "$label" -ForegroundColor White
             }
         }
 
@@ -334,8 +391,9 @@ function Manage-OneSystem {
         }
 
         # Подменю действий для выбранной камеры
+        $selLabelAscii = ConvertTo-Translit $selected.Label
         Write-Host ""
-        Write-Host "  Vybrana kamera: $($selected.Label) [$($selected.Status)]" -ForegroundColor Cyan
+        Write-Host "  Vybrana kamera: $selLabelAscii [$($selected.Status)]" -ForegroundColor Cyan
         Write-Host ""
         if ($selected.Status -eq 'gray') {
             Write-Host "  1  Snyat seryy marker (vernut v otslezhivanie)" -ForegroundColor Green
@@ -373,19 +431,21 @@ function Manage-OneSystem {
         #   ok|delete|<label>          ok|grayed-fallback|<label>
         #   noop|<action>|<label>
         if ($resStr -match '^ok\|grayed-fallback\|(.+)$') {
-            Write-Host "  Kamera '$($Matches[1])' pomechena SERYM" -ForegroundColor Yellow
+            $lbl = ConvertTo-Translit $Matches[1]
+            Write-Host "  Kamera '$lbl' pomechena SERYM" -ForegroundColor Yellow
             Write-Host "  (Eto NVR-kanal - fizicheski udalit nelzya, NVR ego vsegda otdaet.)" -ForegroundColor DarkGray
         } elseif ($resStr -match '^ok\|(gray|ungray|delete)\|(.+)$') {
-            $action = $Matches[1]; $label = $Matches[2]
+            $action = $Matches[1]; $label = ConvertTo-Translit $Matches[2]
             switch ($action) {
                 'gray'   { Write-Host "  Kamera '$label' pomechena SERYM (otslezhivanie otklyucheno)" -ForegroundColor Yellow }
                 'ungray' { Write-Host "  Kamera '$label' AKTIVIROVANA (otslezhivanie vklyucheno)"  -ForegroundColor Green  }
                 'delete' { Write-Host "  Kamera '$label' UDALENA iz konfiga"                       -ForegroundColor Red    }
             }
         } elseif ($resStr -match '^noop\|(.+)\|(.+)$') {
-            Write-Host "  Bez izmeneniy: $($Matches[2])" -ForegroundColor DarkGray
+            $lbl = ConvertTo-Translit $Matches[2]
+            Write-Host "  Bez izmeneniy: $lbl" -ForegroundColor DarkGray
         } else {
-            Write-Host "  $resStr" -ForegroundColor Yellow
+            Write-Host "  $(ConvertTo-Translit $resStr)" -ForegroundColor Yellow
         }
         Start-Sleep -Seconds 1
     }
@@ -429,9 +489,10 @@ function Manage-GrayCameras {
         $i = 1
         $map = @{}
         foreach ($s in $systems) {
-            $num = "{0,2}" -f $i
-            $stats = "(seryh: $($s.Gray) iz $($s.Total))"
-            Write-Host "  $num  $($s.Name)" -NoNewline -ForegroundColor White
+            $num     = "{0,2}" -f $i
+            $stats   = "(seryh: $($s.Gray) iz $($s.Total))"
+            $nameTr  = ConvertTo-Translit $s.Name
+            Write-Host "  $num  $nameTr" -NoNewline -ForegroundColor White
             Write-Host "  $stats" -ForegroundColor DarkGray
             $map[[string]$i] = $s
             $i++

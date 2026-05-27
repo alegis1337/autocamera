@@ -54,10 +54,7 @@
     "enabled": true,
     "displayMode": "grid",
     "gridColumns": 6,
-    "unusedChannels": [
-      10,
-      11
-    ],
+    "unusedChannels": [],
     "nvrIp": "10.0.120.192",
     "rtspUser": "EfremovOE",
     "rtspPass": "gf1Ok5Y5",
