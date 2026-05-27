@@ -101,17 +101,23 @@ async function isapiSnapshot(baseUrl, channel, user, pass) {
 async function snapRtsp(sys, cam, localPath) {
   const ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg';
 
-  // Строим RTSP URL
+  // Строим RTSP URL. Креды читаем сначала через env (rtspUserEnv/rtspPassEnv,
+  // nvrRtspUserEnv/nvrRtspPassEnv), fallback — буквальные sys.rtspUser/Pass.
+  const envOr = (envKey, literal) => (envKey && process.env[envKey]) || literal;
   let rtspUrl;
   if (cam.rtspPath) {
     // Через NVR (Hikvision-формат): rtsp://user:pass@nvrIp/Streaming/Channels/N01
     if (cam.viaNvr && sys.nvrIp) {
-      const u = sys.nvrRtspUser || sys.rtspUser || 'admin';
-      const p = sys.nvrRtspPass || sys.rtspPass || '';
+      const u = envOr(sys.nvrRtspUserEnv, sys.nvrRtspUser)
+             || envOr(sys.rtspUserEnv,    sys.rtspUser)
+             || 'admin';
+      const p = envOr(sys.nvrRtspPassEnv, sys.nvrRtspPass)
+             || envOr(sys.rtspPassEnv,    sys.rtspPass)
+             || '';
       rtspUrl = `rtsp://${encodeURIComponent(u)}:${encodeURIComponent(p)}@${sys.nvrIp}${cam.rtspPath}`;
     } else if (cam.ip) {
-      const u = sys.rtspUser || 'admin';
-      const p = sys.rtspPass || '';
+      const u = envOr(sys.rtspUserEnv, sys.rtspUser) || 'admin';
+      const p = envOr(sys.rtspPassEnv, sys.rtspPass) || '';
       rtspUrl = `rtsp://${encodeURIComponent(u)}:${encodeURIComponent(p)}@${cam.ip}${cam.rtspPath}`;
     }
   }

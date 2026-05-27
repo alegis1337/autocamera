@@ -56,8 +56,8 @@
     "gridColumns": 6,
     "unusedChannels": [],
     "nvrIp": "10.0.120.192",
-    "rtspUser": "EfremovOE",
-    "rtspPass": "gf1Ok5Y5",
+    "rtspUserEnv": "IPANDA_OFFICE_RTSP_USER",
+    "rtspPassEnv": "IPANDA_OFFICE_RTSP_PASS",
     "viaNvr": true,
     "cameras": [
       {
@@ -230,10 +230,10 @@
     "displayMode": "grid",
     "gridColumns": 4,
     "nvrIp": "10.0.120.220",
-    "rtspUser": "admin",
-    "rtspPass": "admin",
-    "nvrRtspUser": "admin",
-    "nvrRtspPass": "admin123",
+    "rtspUserEnv": "IPANDA_NOVIY_CEH_RTSP_USER",
+    "rtspPassEnv": "IPANDA_NOVIY_CEH_RTSP_PASS",
+    "nvrRtspUserEnv": "IPANDA_NOVIY_CEH_NVR_RTSP_USER",
+    "nvrRtspPassEnv": "IPANDA_NOVIY_CEH_NVR_RTSP_PASS",
     "viaNvr": true,
     "cameras": [
       {

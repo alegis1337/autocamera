@@ -318,9 +318,17 @@ for (let i = 0; i < systems.length; i++) {
 
   // ── iPanda (RTSP): проверяем камеры через RTSP DESCRIBE ──
   if (sys.type === 'ipanda-rtsp' && sys.cameras?.length) {
+    // RTSP-креды читаем приоритетно через env-переменные (sys.rtspUserEnv /
+    // sys.rtspPassEnv), как fallback — буквальные sys.rtspUser / sys.rtspPass.
+    // То же самое для NVR-прокси. Сделано чтобы реальные пароли не лежали
+    // в config/systems.json (который в git).
+    const rtspUser    = (sys.rtspUserEnv    && process.env[sys.rtspUserEnv])    || sys.rtspUser    || 'admin';
+    const rtspPass    = (sys.rtspPassEnv    && process.env[sys.rtspPassEnv])    || sys.rtspPass    || '';
+    const nvrRtspUser = (sys.nvrRtspUserEnv && process.env[sys.nvrRtspUserEnv]) || sys.nvrRtspUser;
+    const nvrRtspPass = (sys.nvrRtspPassEnv && process.env[sys.nvrRtspPassEnv]) || sys.nvrRtspPass;
     const { cameras: rtspCams, error: rtspError } = await checkCamerasByRtsp(
-      sys.cameras, sys.rtspUser || 'admin', sys.rtspPass || '', sys.id,
-      { nvrIp: sys.nvrIp, nvrRtspUser: sys.nvrRtspUser, nvrRtspPass: sys.nvrRtspPass,
+      sys.cameras, rtspUser, rtspPass, sys.id,
+      { nvrIp: sys.nvrIp, nvrRtspUser, nvrRtspPass,
         probeVideo: sys.viaNvr || sys.cameras.some(c => c.viaNvr) }
     );
 
