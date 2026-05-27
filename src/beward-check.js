@@ -30,7 +30,7 @@ const DEFAULT_FRESHNESS_MIN = 180; // 3 часа
  * чем по одному spawn на камеру.
  *
  * Возвращает массив объектов вида:
- *   { key: "10.10.10.5(5050)", folder: "...", newestFile: "...", ageMin: 3.2 }
+ *   { key: "192.168.1.5(5050)", folder: "...", newestFile: "...", ageMin: 3.2 }
  */
 async function listFreshness({ host, shareName, cameras, freshnessMin }) {
   // Собираем имя шары из кодпоинтов, чтобы не зависеть от кодировки файла .ps1
@@ -146,7 +146,7 @@ async function listFreshness({ host, shareName, cameras, freshnessMin }) {
 /**
  * @param {object} sys
  * @param {string} sys.id
- * @param {string} sys.host           e.g. "192.168.99.122"
+ * @param {string} sys.host           SMB-хост (из .env через ${VAR})
  * @param {string} sys.shareName      имя SMB-шары (Unicode), e.g. "новая папка"
  * @param {string} sys.smbUser
  * @param {string} sys.smbPass

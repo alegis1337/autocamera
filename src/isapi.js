@@ -155,7 +155,7 @@ function extractAllBlocks(xml, tag) {
 /**
  * Fetches all camera statuses from a Hikvision/HiWatch DVR/NVR via ISAPI.
  *
- * @param {string} baseUrl - e.g. "http://10.0.120.30"
+ * @param {string} baseUrl - e.g. "http://nvr.example.local"
  * @param {string} user
  * @param {string} pass
  * @returns {Promise<{cameras: Array, error: string|null}>}

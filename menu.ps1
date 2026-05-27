@@ -532,7 +532,7 @@ function Add-NewDevice {
     Write-Host "  ponyat chto eto za ustroystvo (NVR/kamera/TRASSIR/...)." -ForegroundColor Gray
     Write-Host ""
 
-    $ip = Read-Host "  IP-adres ili host (naprimer 10.0.120.45)"
+    $ip = Read-Host "  IP-adres ili host (naprimer 192.168.1.45)"
     if (-not $ip) { return }
 
     $portInput = Read-Host "  HTTP-port (Enter = 80)"

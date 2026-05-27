@@ -14,7 +14,7 @@ import { randomUUID } from 'crypto';
 try { dns.setServers(['1.1.1.1', '8.8.8.8']); } catch {}
 
 /**
- * Извлекает домен из SMTP-пользователя (efremovoe@dc1c.ru → dc1c.ru).
+ * Извлекает домен из SMTP-пользователя (user@example.com → example.com).
  * Используется для генерации Message-ID.
  */
 function senderDomain() {
@@ -540,10 +540,7 @@ ${historyHtml}
 
 <div class="signature">
 С уважением,<br>
-специалист технической поддержки<br><br>
-<span class="name">Ефремов Олег</span><br>
-<span class="company">ГК «Цифровая Сибирь»</span><br>
-+7 906 916-08-80
+специалист технической поддержки${process.env.REPORT_SIGN_NAME ? `<br><br><span class="name">${process.env.REPORT_SIGN_NAME}</span>` : ''}${process.env.REPORT_SIGN_COMPANY ? `<br><span class="company">${process.env.REPORT_SIGN_COMPANY}</span>` : ''}${process.env.REPORT_SIGN_PHONE ? `<br>${process.env.REPORT_SIGN_PHONE}` : ''}
 </div>
 
 

@@ -9,12 +9,12 @@
  *
  * Пример вывода:
  *   [2026-03-31T08:00:01.123Z] [INFO] [STARTUP] Загрузка конфигурации | systems=2
- *   [2026-03-31T08:00:02.456Z] [INFO] [noviy-ceh:browser] Запуск Chromium | url=http://10.0.120.220/
+ *   [2026-03-31T08:00:02.456Z] [INFO] [noviy-ceh:browser] Запуск Chromium | url=http://<nvr>/
  *   [2026-03-31T08:00:05.789Z] [INFO] [noviy-ceh:browser] Логин выполнен | type=ipanda elapsed=3.3s
  *   [2026-03-31T08:00:06.012Z] [INFO] [noviy-ceh:browser] Скриншот сохранён | file=noviy-ceh-2026-03-31.png size=245KB
  *   [2026-03-31T08:00:08.345Z] [INFO] [noviy-ceh:ai] Анализ завершён | model=gemini cameras=10 online=8 offline=2 elapsed=2.3s
  *   [2026-03-31T08:00:08.346Z] [WARN] [noviy-ceh:ai] Камера offline | index=3 notes="Нет соединения"
- *   [2026-03-31T08:00:08.500Z] [ERROR] [hiwatch:browser] Не удалось подключиться | url=http://10.0.120.30/ error="net::ERR_CONNECTION_REFUSED"
+ *   [2026-03-31T08:00:08.500Z] [ERROR] [hiwatch:browser] Не удалось подключиться | url=http://<nvr>/ error="net::ERR_CONNECTION_REFUSED"
  */
 
 import fs from 'fs';

@@ -44,6 +44,7 @@ import { loadTodayTimeline, saveTimeline, diffAndAppend, summarize } from './tim
 import { captureAll, cleanupRun } from './snapshots.js';
 import { uploadFreshSnapshot, cleanupOlderThan } from './bitrix-disk.js';
 import * as lastGood from './last-good.js';
+import { loadSystems } from './config-loader.js';
 
 // ─── Load .env ────────────────────────────────────────────────────────────────
 const dotenvPath = path.resolve('.env');
@@ -112,10 +113,11 @@ if (process.env.TEST_MODE === 'true') {
 }
 
 // ─── Load systems config ──────────────────────────────────────────────────────
+// Через config-loader, который разворачивает ${VAR} плейсхолдеры из .env.
+// Все IP/host'ы/креды в systems.json — строки вида "${TRASSIR_HOST}" и т.п.,
+// чтобы в JSON (а он в git) не лежало никаких чувствительных данных.
 const ROOT = path.resolve('.');
-const systemsConfig = JSON.parse(
-  fs.readFileSync(path.join(ROOT, 'config', 'systems.json'), 'utf8')
-);
+const systemsConfig = loadSystems();
 
 // ─── Ensure directories ───────────────────────────────────────────────────────
 fs.mkdirSync(path.join(ROOT, 'reports'), { recursive: true });

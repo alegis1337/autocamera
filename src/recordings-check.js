@@ -20,7 +20,7 @@
  *   {
  *     "id": "evroplast-stroyka",
  *     "type": "smb-recordings",
- *     "host": "10.0.120.4",
+ *     "host": "${STROYKA_SMB_HOST}",
  *     "shareName": "video",
  *     "basePath": "video",
  *     "freshnessMin": 60,
@@ -194,7 +194,7 @@ function evaluateChannel(files, cfg) {
 /**
  * @param {object} sys
  * @param {string} sys.id
- * @param {string} sys.host           "10.0.120.4"
+ * @param {string} sys.host           SMB-хост (из .env через ${VAR})
  * @param {string} sys.shareName      имя шары, e.g. "video"
  * @param {string} [sys.basePath]     подпапка внутри шары, e.g. "video"
  * @param {string} sys.smbUser

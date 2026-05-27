@@ -13,7 +13,7 @@
  *
  * Использование:
  *   import { detectDevice } from './detect-device.js';
- *   const info = await detectDevice('10.10.10.42', 80, 'admin', 'secret');
+ *   const info = await detectDevice('192.168.1.42', 80, 'admin', 'secret');
  *   // info = { ok: true, kind: 'hikvision-nvr', vendor, model, channelCount, ... }
  *
  * Вызов как CLI (для menu.ps1):

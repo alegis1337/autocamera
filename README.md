@@ -29,7 +29,7 @@ Task Scheduler — человек не нужен.
 | Офис (iPanda) | RTSP DESCRIBE через NVR | 16 |
 | **Склад (HiWatch)** | Hikvision ISAPI + Tapo RTSP | 16 + ТС40 |
 | Новый цех (iPanda) | RTSP DESCRIBE через NVR | 10 |
-| Стройка (записи) | SMB-папки `\\10.0.120.4\Video\{9,11,13}` | 3 канала |
+| Стройка (записи) | SMB-папки `\\<host>\Video\{9,11,13}` | 3 канала |
 | Цех выдува (HiWatch) | Hikvision ISAPI | 16 |
 | BEWARD (удалённые) | SMB-шара (свежесть файлов) | 7 |
 | iVMS (Hikvision) | ISAPI per-camera | 3 |
@@ -57,6 +57,14 @@ Task Scheduler — человек не нужен.
   `rtspUserEnv`/`rtspPassEnv`-ссылки.
 - **`Co-Authored-By: Claude`** — разрешено в коммитах (раньше было
   запрещено).
+- **Полная чистка IP/контактов из репо**. Все `host`/`nvrIp`/`cameras[].ip`
+  в `config/systems.json` заменены на `${VAR}`-плейсхолдеры — реальные
+  адреса теперь только в `.env`. Добавлен `src/config-loader.js` с
+  рекурсивной подстановкой `${VAR}` → `process.env.VAR`. Контактный блок
+  в email-отчётах настраивается через `REPORT_SIGN_*` env-переменные.
+- **pre-commit hook** (локально, `.git/hooks/pre-commit`) автоматически
+  блокирует коммит при подозрении на пароль, RFC 1918 IP, корпоративный
+  домен или Bitrix24-webhook. Защита от случайных утечек.
 
 ## Что нового в v2.1 (май 2026)
 
@@ -77,7 +85,7 @@ Task Scheduler — человек не нужен.
 - **Ростелеком** — `portalRetries` снижен с 20 до 7 (раньше 20 × 45 сек = 15 мин,
   пожирало всё окно light-прогона при недоступности портала).
 
-[Полная история изменений](https://github.com/alegis1337/autocamera/commits/main)
+Полная история изменений — в git-логе репозитория.
 
 ## Стек
 
@@ -153,7 +161,7 @@ autocamera/
 ## Быстрый старт
 
 ```powershell
-git clone git@github.com:alegis1337/autocamera.git
+git clone <repo-url>
 cd autocamera
 npm install
 Copy-Item .env.example .env       # затем заполнить креды
@@ -172,9 +180,3 @@ Copy-Item .env.example .env       # затем заполнить креды
 - [.env.example](.env.example) — шаблон конфигурации со всеми переменными окружения
 - [README.txt](README.txt) — текстовая версия README для Notepad на VM
 
-## Контакт
-
-Ефремов Олег — техническая поддержка
-`efremovoe@dc1c.ru` · +7 906 916-08-80
-
-ГК «Цифровая Сибирь»
