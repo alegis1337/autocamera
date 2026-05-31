@@ -1,7 +1,7 @@
 {
   "name": "autocamera",
-  "version": "1.0.0",
-  "description": "Automated camera monitoring — Playwright + polza.ai vision",
+  "version": "2.2.0",
+  "description": "Детерминированный мониторинг 9 систем камер: Hikvision/HiWatch ISAPI, RTSP, SMB, TRASSIR SDK; Playwright только для портала Ростелеком",
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
@@ -14,7 +14,6 @@
     "docx": "^9.6.1",
     "dotenv": "^16.0.0",
     "nodemailer": "^6.9.0",
-    "openai": "^4.0.0",
     "playwright": "^1.40.0"
   },
   "engines": {
