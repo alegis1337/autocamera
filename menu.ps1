@@ -78,7 +78,13 @@ function Show-Menu {
         $dailyCfg  = $sch.daily
         if ($lightCfg -and $dailyCfg) {
             $lightInt = [int]$lightCfg.intervalMinutes
-            $schedInfo = "Light $($lightCfg.startTimeMSK) MSK kazhdye ${lightInt}min, Daily $($dailyCfg.startTimeMSK) MSK"
+            $lightDur = [int]$lightCfg.durationHours
+            if ($lightDur -ge 24) {
+                $lightDesc = "Light kazhdye ${lightInt}min kruglosutochno (24/7)"
+            } else {
+                $lightDesc = "Light $($lightCfg.startTimeMSK) MSK kazhdye ${lightInt}min (${lightDur}ch okno)"
+            }
+            $schedInfo = "$lightDesc, Daily $($dailyCfg.startTimeMSK) MSK"
             $lightOk = $false; $dailyOk = $false
             if ($lightCfg.taskName) {
                 $lightOk = [bool](Get-ScheduledTask -TaskName $lightCfg.taskName -ErrorAction SilentlyContinue)
