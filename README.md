@@ -155,7 +155,8 @@ autocamera/
 ├── state/                   helpdesk-state.json, timeline-*.json (не в git)
 ├── screenshots/last-good/   кэш миниатюр для отчётов
 ├── logs/                    дневные логи (хранятся 14 дней)
-└── reports/                 HTML-отчёты + live.html
+├── reports/                 HTML-отчёты + live.html
+└── test/                    юнит-тесты (node:test) — npm test
 ```
 
 ## Быстрый старт
@@ -164,6 +165,7 @@ autocamera/
 git clone <repo-url>
 cd autocamera
 npm install
+npm test                          # юнит-тесты (node:test, без доп. зависимостей)
 Copy-Item .env.example .env       # затем заполнить креды
 .\setup-schedule.ps1              # создать задачи Light + Daily в Планировщике
 .\menu.ps1                        # интерактивное меню

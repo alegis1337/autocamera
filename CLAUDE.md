@@ -217,6 +217,15 @@ ISAPI. Ростелеком — единственный случай, где н
 | `manage-gray.mjs` | Старый CLI grey-management, оставлен для совместимости |
 | `tplink-tapo-check.js` | **(v2.1)** Проверка TP-Link Tapo через RTSP+ffmpeg. Возвращает online/recording/snapshotPath. KLAP-handshake для SD-карты — TODO. |
 
+### Тесты (`test/`)
+
+Юнит-тесты — нативный `node:test` (Node ≥18, без внешних зависимостей),
+файлы `test/*.test.js`. Запуск — `npm test`. Покрывают **чистую логику**:
+`state.diffAndUpdate` (helpdesk-дедуп), `reporter.isUnusedChannel` (серые
+камеры), `timeline.formatDuration/todayYmd/cameraKey`. Сетевые чекеры
+(ISAPI / RTSP / SMB / Playwright) юнит-тестами не покрываются — для них
+`--dry-run`.
+
 ---
 
 ## Поток выполнения
