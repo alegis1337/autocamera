@@ -677,13 +677,13 @@ const runMeta = {
   timelineSummary,
 };
 
-// Готовим snapMap для отчётов. Для браузерных отчётов (full + live.html) —
-// относительные пути file://. Для email-отчётов — CID-вложения с inline-картинками.
+// Готовим snapMap для браузерных отчётов (full + live.html) — относительные
+// пути file://. Для email-отчётов CID-вложения собираются ОТДЕЛЬНО по каждой
+// группе в цикле ниже: cidList — это одновременно список inline-вложений
+// письма, поэтому общий список на обе группы означал бы, что заказчик получает
+// в письме чужие скриншоты (камеры соседней группы).
 const { snapMap: fileSnapMap } = buildSnapMap(systemResults, null, 'file');
-const { snapMap: cidSnapMap, cidList } = buildSnapMap(systemResults, null, 'cid');
-log.info('snap-map', 'Картинок для отчёта', {
-  file: fileSnapMap.size, cid: cidSnapMap.size,
-});
+log.info('snap-map', 'Картинок для отчёта (file)', { file: fileSnapMap.size });
 
 // Общий отчёт для браузера (все группы вместе)
 const fullReportPath = buildReport({ systemResults, runMeta, snapMap: fileSnapMap });
@@ -714,11 +714,20 @@ for (const group of REPORT_GROUPS) {
   }, 0);
   totalIssues += groupIssues;
 
+  // CID-снимки строго по системам ЭТОЙ группы. И src="cid:..." в HTML, и
+  // inline-вложения письма (cidList) берутся из одного набора — поэтому
+  // ограничиваем его камерами группы, иначе в письмо «Европласт» попали бы
+  // вложения камер «Онлайн» и наоборот (заказчик видит чужие скриншоты).
+  const { snapMap: groupSnapMap, cidList: groupCidList } =
+    buildSnapMap(groupSystems, null, 'cid');
+
   const reportPath = buildReport({
-    systemResults, runMeta, group, snapMap: cidSnapMap,
+    systemResults, runMeta, group, snapMap: groupSnapMap,
   });
-  log.info('report', `HTML-отчёт сохранён [${group}]`, { path: reportPath, issues: groupIssues });
-  groupReports.push({ group, reportPath, issues: groupIssues });
+  log.info('report', `HTML-отчёт сохранён [${group}]`, {
+    path: reportPath, issues: groupIssues, cidImages: groupCidList.length,
+  });
+  groupReports.push({ group, reportPath, issues: groupIssues, cidList: groupCidList });
 }
 
 if (totalIssues > 0) {
@@ -730,7 +739,7 @@ if (totalIssues > 0) {
 // ─── Send email per group ─────────────────────────────────────────────────────
 let emailFailures = 0;
 if (!isDryRun) {
-  for (const { group, reportPath, issues } of groupReports) {
+  for (const { group, reportPath, issues, cidList } of groupReports) {
     const toEnv = group === 'Европласт' ? process.env.REPORT_TO_EVROPLAST
                 : group === 'Онлайн'    ? process.env.REPORT_TO_ONLINE
                 : '';
@@ -740,7 +749,7 @@ if (!isDryRun) {
       await sendReport({
         reportPath, issueCount: issues, runTime: startTime,
         screenshotPaths: [], groupLabel: group,
-        inlineImages: cidList,    // ← CID-attachments для миниатюр в письме
+        inlineImages: cidList,    // ← CID-attachments только этой группы
       });
       log.stepEnd('email', 'ok', `Email отправлен [${group}]`);
     } catch (err) {
